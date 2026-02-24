@@ -1,0 +1,175 @@
+################################################################################
+# gradle/libs.versions.toml (FIX & Messaging Added)
+#
+# 목적
+# - 프로젝트 전역에서 사용하는 플러그인/라이브러리 버전을 "한 곳"에서 관리한다.
+# - 각 모듈(build.gradle.kts)에서는 가능하면 alias(libs.xxx)만 사용한다.
+#
+# 핵심 원칙
+# 1) Spring Boot 관련 라이브러리 버전은 가능하면 "Spring Boot BOM"에 위임한다.
+#    - spring-boot-starter-* / spring-context / spring-tx 등은 version을 여기서 지정하지 않는다.
+#    - RabbitMQ (spring-boot-starter-amqp) 포함.
+# 2) Spring Boot BOM이 "관리하지 않는" 라이브러리는 여기서 버전을 지정한다.
+#    - MyBatis, MapStruct, JDBC Drivers, Tibco RV 등.
+# 3) 특정 버전을 강제해야 하는 경우 (예: Kafka 최신 4.1 클라이언트 사용)
+#    - BOM 버전을 오버라이드하거나 별도 version으로 관리한다.
+################################################################################
+
+[versions]
+################################################################################
+# Spring Boot / Plugin Versions
+################################################################################
+springBoot = "4.0.2"
+springDependencyManagement = "1.1.7"
+
+################################################################################
+# MyBatis
+# - Spring Boot 4.x 호환 (MyBatis Starter 4.x)
+################################################################################
+mybatisSpringBootStarter = "4.0.1"
+mybatisCore = "3.5.19"
+
+################################################################################
+# MapStruct
+# - Entity <-> Domain 매핑 자동화
+################################################################################
+mapstruct = "1.6.3"
+
+################################################################################
+# Messaging (New)
+#
+# 1. Kafka: 디폴트로 4.1.0 사용 (요청 사항 반영)
+#    - Spring Boot BOM이 관리하는 버전보다 최신을 쓰려면 명시 필요.
+# 2. RabbitMQ: Spring Boot BOM 버전을 따름 (버전 명시 X)
+# 3. Tibco RV: Maven Central에 없음. 보통 8.4.x or 8.5.x 많이 사용.
+#    - 여기서는 8.5.0으로 지정 (로컬 jar 관리용)
+################################################################################
+kafkaClients = "4.1.0"
+tibrv = "8.5.0"
+netty = "4.1.100.Final"
+slf4j = "2.0.16"
+
+################################################################################
+# JDBC Drivers
+################################################################################
+postgresql = "42.7.4"
+mysqlConnector = "8.4.0"
+mssqlJdbc = "12.6.3.jre11"
+oracleJdbc = "23.4.0.24.05"
+
+################################################################################
+# Test
+################################################################################
+junit = "5.11.0"
+
+[plugins]
+################################################################################
+# Gradle Plugins
+################################################################################
+spring-boot = { id = "org.springframework.boot", version.ref = "springBoot" }
+spring-dependency-management = { id = "io.spring.dependency-management", version.ref = "springDependencyManagement" }
+
+[libraries]
+################################################################################
+# Spring Boot Starters (BOM Managed)
+# - 버전 생략 (Spring Boot 버전을 따라감)
+################################################################################
+
+# ✅ 기본
+# - spring-boot: ConfigurationProperties 등 핵심 Boot API 제공 (컴파일 시 필요)
+# - configuration-processor: 설정 메타데이터 자동 생성용 (annotationProcessor로 사용)
+spring-boot = { module = "org.springframework.boot:spring-boot" }
+spring-boot-configuration-processor = { module = "org.springframework.boot:spring-boot-configuration-processor" }
+spring-boot-starter = { module = "org.springframework.boot:spring-boot-starter" }
+spring-boot-autoconfigure = { module = "org.springframework.boot:spring-boot-autoconfigure" }
+
+# ✅ JPA
+spring-boot-starter-data-jpa = { module = "org.springframework.boot:spring-boot-starter-data-jpa" }
+
+# ✅ Redis
+spring-boot-starter-data-redis = { module = "org.springframework.boot:spring-boot-starter-data-redis" }
+
+# ✅ Test
+spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test" }
+
+# ✅ RabbitMQ (New)
+# - Spring Boot가 공식 지원하므로 BOM 버전을 그대로 사용
+spring-boot-starter-amqp = { module = "org.springframework.boot:spring-boot-starter-amqp" }
+spring-boot-starter-kafka = { module = "org.springframework.boot:spring-boot-starter-kafka" }
+
+# ✅ Web MVC
+# - Spring Boot 4.0 부터 spring-boot-starter-web 에서 이름 변경됨
+spring-boot-starter-webmvc = { module = "org.springframework.boot:spring-boot-starter-webmvc" }
+
+# ✅ Actuator
+# - /actuator/health 등 운영 모니터링 엔드포인트 제공
+spring-boot-starter-actuator = { module = "org.springframework.boot:spring-boot-starter-actuator" }
+
+# ✅ Validation
+# - @Valid, @NotNull 등 Bean Validation 기능 제공
+spring-boot-starter-validation = { module = "org.springframework.boot:spring-boot-starter-validation" }
+
+# ✅ Security
+# - 인증(Authentication) 및 인가(Authorization) 기능 제공
+spring-boot-starter-security = { module = "org.springframework.boot:spring-boot-starter-security" }
+
+# ✅ Security Test
+# - @WithMockUser 등 Security 테스트 유틸리티 제공
+spring-boot-starter-security-test = { module = "org.springframework.boot:spring-boot-starter-security-test" }
+
+# ✅ Web MVC Test
+# - Spring Boot 4.0 기준 Web MVC 테스트 스타터
+spring-boot-starter-webmvc-test = { module = "org.springframework.boot:spring-boot-starter-webmvc-test" }
+
+################################################################################
+# Kafka (New)
+# - Spring Boot Starter Kafka를 사용하되, Client 버전은 4.1.0으로 강제
+################################################################################
+spring-kafka = { module = "org.springframework.kafka:spring-kafka" }
+kafka-clients = { module = "org.apache.kafka:kafka-clients", version.ref = "kafkaClients" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind" }
+netty-all = { module = "io.netty:netty-all", version.ref = "netty" }
+
+################################################################################
+# Tibco RV (New)
+# - 서드파티/상용 라이브러리. Maven Central에 없을 확률 높음.
+# - 보통 로컬 레포지토리나 사내 Nexus에 등록 후 사용.
+# - 모듈명: com.tibco:tibrvj (예시)
+################################################################################
+tibrv = { module = "com.tibco:tibrvj", version.ref = "tibrv" }
+
+################################################################################
+# MyBatis
+################################################################################
+mybatis-spring-boot-starter = { module = "org.mybatis.spring.boot:mybatis-spring-boot-starter", version.ref = "mybatisSpringBootStarter" }
+mybatis-core = { module = "org.mybatis:mybatis", version.ref = "mybatisCore" }
+
+################################################################################
+# MapStruct
+################################################################################
+mapstruct = { module = "org.mapstruct:mapstruct", version.ref = "mapstruct" }
+mapstruct-processor = { module = "org.mapstruct:mapstruct-processor", version.ref = "mapstruct" }
+
+################################################################################
+# Spring Framework (Compile Only)
+################################################################################
+spring-context = { module = "org.springframework:spring-context" }
+spring-tx = { module = "org.springframework:spring-tx" }
+micrometer-core = { module = "io.micrometer:micrometer-core" }
+
+# Logging / Jakarta Annotations (compile-only in core modules)
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+jakarta-annotation-api = { module = "jakarta.annotation:jakarta.annotation-api" }
+
+################################################################################
+# JDBC Drivers
+################################################################################
+postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
+mysql-connector-j = { module = "com.mysql:mysql-connector-j", version.ref = "mysqlConnector" }
+mssql-jdbc = { module = "com.microsoft.sqlserver:mssql-jdbc", version.ref = "mssqlJdbc" }
+oracle-ojdbc11 = { module = "com.oracle.database.jdbc:ojdbc11", version.ref = "oracleJdbc" }
+
+################################################################################
+# Test
+################################################################################
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }

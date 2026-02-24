@@ -1,0 +1,7 @@
+spring:
+  application:
+    name: tc-eqp-socket-sim
+
+logging:
+  level:
+    root: INFO
