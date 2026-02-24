@@ -1,0 +1,126 @@
+tc:
+  eqpsim:
+    defaults:
+      default-wait-timeout-sec: 60
+      default-handshake-timeout-sec: 60
+
+    # socketType 정의(3종)
+    socket-types:
+      LINE_LF:
+        kind: LINE_END
+        line-ending: LF
+
+      LINE_CR:
+        kind: LINE_END
+        line-ending: CR
+
+      LINE_CRLF:
+        kind: LINE_END
+        line-ending: CRLF
+
+      STX_ETX:
+        kind: START_END
+        start-hex: "02"
+        end-hex: "03"
+
+      RX_REGEX:
+        kind: REGEX
+        regex-pattern: "\\{[^}]+\\}"
+
+    # endpoint 정의
+    endpoints:
+      listen:
+        L1:
+          bind: "0.0.0.0:31001"
+          max-conn: 20
+        L2:
+          bind: "0.0.0.0:31002"
+          max-conn: 20
+        L3:
+          bind: "0.0.0.0:31003"
+          max-conn: 20
+
+      connect:
+        C1:
+          target: "127.0.0.1:32001"
+          conn-count: 20
+        C2:
+          target: "127.0.0.1:32002"
+          conn-count: 20
+        C3:
+          target: "127.0.0.1:32003"
+          conn-count: 20
+
+      connect-backoff:
+        initial-sec: 1
+        max-sec: 30
+        multiplier: 2.0
+
+    # profile 정의(시나리오 파일)
+    profiles:
+      scenario_case1:
+        type: SCENARIO
+        scenario-file: "config/scenario/normal_scenario_case1.md"
+
+      scenario_fault_disconnect:
+        type: SCENARIO
+        scenario-file: "config/scenario/fault_disconnect_case1.md"
+
+    # ✅ EQP 정의(샘플 6대)
+    # - 실제 120대/60대 구성은 아래 tools/gen-eqps.ps1로 생성하는 것을 권장
+    eqps:
+      # PASSIVE (TC가 접속)
+      TEST001:
+        mode: PASSIVE
+        endpoint: L1
+        socket-type: LINE_LF
+        profile: scenario_case1
+        vars:
+          lotid: "TESTLOT01"
+          stepid: "TESTSTEP01"
+
+      TEST002:
+        mode: PASSIVE
+        endpoint: L1
+        socket-type: LINE_LF
+        profile: scenario_fault_disconnect
+        vars:
+          lotid: "TESTLOT02"
+          stepid: "TESTSTEP02"
+
+      TEST021:
+        mode: PASSIVE
+        endpoint: L2
+        socket-type: LINE_LF
+        profile: scenario_case1
+        vars:
+          lotid: "TESTLOT21"
+          stepid: "TESTSTEP21"
+
+      # ACTIVE (시뮬레이터가 TC로 접속)
+      TEST061:
+        mode: ACTIVE
+        endpoint: C1
+        socket-type: LINE_LF
+        profile: scenario_case1
+        vars:
+          lotid: "TESTLOT61"
+          stepid: "TESTSTEP61"
+
+      TEST062:
+        mode: ACTIVE
+        endpoint: C1
+        socket-type: LINE_LF
+        profile: scenario_case1
+        vars:
+          lotid: "TESTLOT62"
+          stepid: "TESTSTEP62"
+
+      TEST081:
+        mode: ACTIVE
+        endpoint: C2
+        socket-type: LINE_LF
+        profile: scenario_fault_disconnect
+        vars:
+          lotid: "TESTLOT81"
+          stepid: "TESTSTEP81"

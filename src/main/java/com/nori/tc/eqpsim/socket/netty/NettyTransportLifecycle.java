@@ -1,0 +1,259 @@
+package com.nori.tc.eqpsim.socket.netty;
+
+import com.nori.tc.eqpsim.socket.config.EndpointsProperties;
+import com.nori.tc.eqpsim.socket.logging.StructuredLog;
+import com.nori.tc.eqpsim.socket.runtime.EqpRuntime;
+import com.nori.tc.eqpsim.socket.runtime.EqpRuntimeRegistry;
+import com.nori.tc.eqpsim.socket.runtime.HostPort;
+import com.nori.tc.eqpsim.socket.scenario.ScenarioRegistry;
+import io.netty.bootstrap.Bootstrap;
+import io.netty.bootstrap.ServerBootstrap;
+import io.netty.channel.*;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.channel.socket.nio.NioSocketChannel;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.SmartLifecycle;
+
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+@SuppressWarnings("deprecation")
+public class NettyTransportLifecycle implements SmartLifecycle {
+
+    private static final Logger log = LoggerFactory.getLogger(NettyTransportLifecycle.class);
+
+    private final EqpRuntimeRegistry registry;
+    private final EndpointsProperties.ConnectBackoffProperties backoffProps;
+    private final ScenarioRegistry scenarioRegistry;
+
+    private final Map<String, Channel> listenServerChannels = new LinkedHashMap<>();
+    private final Map<String, AtomicInteger> listenConnCounters = new ConcurrentHashMap<>();
+    private final Map<String, ActiveClientConnector> activeConnectors = new LinkedHashMap<>();
+
+    private EventLoopGroup bossGroup;
+    private EventLoopGroup workerGroup;
+
+    private volatile boolean running = false;
+
+    public NettyTransportLifecycle(EqpRuntimeRegistry registry,
+                                  EndpointsProperties.ConnectBackoffProperties backoffProps,
+                                  ScenarioRegistry scenarioRegistry) {
+        this.registry = registry;
+        this.backoffProps = backoffProps;
+        this.scenarioRegistry = scenarioRegistry;
+    }
+
+    @Override
+    public void start() {
+        if (running) return;
+
+        this.bossGroup = new NioEventLoopGroup(1);
+        this.workerGroup = new NioEventLoopGroup();
+
+        startListenServers();
+        startActiveClients();
+
+        running = true;
+        log.info(StructuredLog.event("transport_started",
+                "listenServerCount", listenServerChannels.size(),
+                "activeClientCount", activeConnectors.size()));
+    }
+
+    private void startListenServers() {
+        for (Map.Entry<String, HostPort> e : registry.getListenBindById().entrySet()) {
+            String endpointId = e.getKey();
+            HostPort bind = e.getValue();
+            int maxConn = registry.getListenMaxConnById().getOrDefault(endpointId, 20);
+
+            AtomicInteger counter = new AtomicInteger(0);
+            listenConnCounters.put(endpointId, counter);
+
+            ServerBootstrap b = new ServerBootstrap();
+            b.group(bossGroup, workerGroup)
+                    .channel(NioServerSocketChannel.class)
+                    .childHandler(new PassiveChildInitializer(endpointId, maxConn, counter, registry, scenarioRegistry))
+                    .childOption(ChannelOption.TCP_NODELAY, true)
+                    .childOption(ChannelOption.SO_KEEPALIVE, true);
+
+            ChannelFuture f = b.bind(bind.host(), bind.port()).syncUninterruptibly();
+            if (!f.isSuccess()) {
+                throw new IllegalStateException("Failed to bind listen endpoint " + endpointId + " at " + bind, f.cause());
+            }
+            listenServerChannels.put(endpointId, f.channel());
+
+            log.info(StructuredLog.event("listen_started",
+                    "endpointId", endpointId,
+                    "bind", bind.host() + ":" + bind.port(),
+                    "maxConn", maxConn));
+        }
+    }
+
+    private void startActiveClients() {
+        for (EqpRuntime eqp : registry.getActiveEqps()) {
+            ActiveClientConnector connector = new ActiveClientConnector(eqp, workerGroup, backoffProps, scenarioRegistry);
+            activeConnectors.put(eqp.getEqpId(), connector);
+            connector.connectNow();
+        }
+    }
+
+    @Override
+    public void stop() {
+        if (!running) return;
+
+        log.info(StructuredLog.event("transport_stopping"));
+
+        for (ActiveClientConnector c : activeConnectors.values()) {
+            try { c.stop(); } catch (Exception ex) {
+                log.warn(StructuredLog.event("active_stop_failed", "eqpId", c.getEqpId()), ex);
+            }
+        }
+        activeConnectors.clear();
+
+        for (Map.Entry<String, Channel> e : listenServerChannels.entrySet()) {
+            try { e.getValue().close().syncUninterruptibly(); } catch (Exception ex) {
+                log.warn(StructuredLog.event("listen_close_failed", "endpointId", e.getKey()), ex);
+            }
+        }
+        listenServerChannels.clear();
+
+        if (bossGroup != null) bossGroup.shutdownGracefully().syncUninterruptibly();
+        if (workerGroup != null) workerGroup.shutdownGracefully().syncUninterruptibly();
+
+        running = false;
+        log.info(StructuredLog.event("transport_stopped"));
+    }
+
+    @Override public boolean isRunning() { return running; }
+    @Override public boolean isAutoStartup() { return true; }
+    @Override public int getPhase() { return 0; }
+
+    @Override
+    public void stop(Runnable callback) {
+        stop();
+        callback.run();
+    }
+
+    private static final class PassiveChildInitializer extends ChannelInitializer<SocketChannel> {
+        private final String endpointId;
+        private final int maxConn;
+        private final AtomicInteger counter;
+        private final EqpRuntimeRegistry registry;
+        private final ScenarioRegistry scenarioRegistry;
+
+        private PassiveChildInitializer(String endpointId, int maxConn, AtomicInteger counter,
+                                        EqpRuntimeRegistry registry, ScenarioRegistry scenarioRegistry) {
+            this.endpointId = endpointId;
+            this.maxConn = maxConn;
+            this.counter = counter;
+            this.registry = registry;
+            this.scenarioRegistry = scenarioRegistry;
+        }
+
+        @Override
+        protected void initChannel(SocketChannel ch) {
+            ch.pipeline().addLast("connLimit", new ConnectionLimitHandler(maxConn, counter));
+            ch.pipeline().addLast("passiveBind", new PassiveBindAndFramerHandler(endpointId, registry, scenarioRegistry));
+        }
+    }
+
+    private static final class ActiveClientConnector {
+        private static final Logger log = LoggerFactory.getLogger(ActiveClientConnector.class);
+
+        private final EqpRuntime eqp;
+        private final EventLoopGroup group;
+        private final EndpointsProperties.ConnectBackoffProperties backoff;
+
+        private final Bootstrap bootstrap;
+
+        private volatile boolean stopped = false;
+        private volatile Channel channel;
+        private long attempt = 0;
+
+        private ActiveClientConnector(EqpRuntime eqp,
+                                      EventLoopGroup group,
+                                      EndpointsProperties.ConnectBackoffProperties backoff,
+                                      ScenarioRegistry scenarioRegistry) {
+            this.eqp = eqp;
+            this.group = group;
+            this.backoff = backoff;
+
+            this.bootstrap = new Bootstrap();
+            bootstrap.group(group)
+                    .channel(NioSocketChannel.class)
+                    .option(ChannelOption.TCP_NODELAY, true)
+                    .option(ChannelOption.SO_KEEPALIVE, true)
+                    .handler(new ActiveChannelInitializer(eqp, scenarioRegistry));
+        }
+
+        public String getEqpId() { return eqp.getEqpId(); }
+
+        public void connectNow() {
+            if (stopped) return;
+            HostPort target = eqp.getEndpointAddress();
+
+            log.info(StructuredLog.event("active_connecting",
+                    "eqpId", eqp.getEqpId(),
+                    "endpointId", eqp.getEndpointId(),
+                    "target", target.host() + ":" + target.port()));
+
+            ChannelFuture f = bootstrap.connect(target.host(), target.port());
+            f.addListener((ChannelFutureListener) future -> {
+                if (stopped) {
+                    if (future.channel() != null) future.channel().close();
+                    return;
+                }
+                if (!future.isSuccess()) {
+                    scheduleReconnect("connect_failed");
+                    return;
+                }
+
+                channel = future.channel();
+                attempt = 0;
+
+                log.info(StructuredLog.event("active_connected",
+                        "eqpId", eqp.getEqpId(),
+                        "connId", channel.id().asShortText(),
+                        "remote", String.valueOf(channel.remoteAddress()),
+                        "local", String.valueOf(channel.localAddress())));
+
+                channel.closeFuture().addListener((ChannelFutureListener) cf -> {
+                    if (stopped) return;
+                    scheduleReconnect("channel_closed");
+                });
+            });
+        }
+
+        private void scheduleReconnect(String reason) {
+            attempt++;
+            long delaySec = computeDelaySec(attempt, backoff.getInitialSec(), backoff.getMaxSec(), backoff.getMultiplier());
+
+            log.warn(StructuredLog.event("active_reconnect_scheduled",
+                    "eqpId", eqp.getEqpId(),
+                    "reason", reason,
+                    "attempt", attempt,
+                    "delaySec", delaySec));
+
+            group.next().schedule(this::connectNow, delaySec, java.util.concurrent.TimeUnit.SECONDS);
+        }
+
+        private static long computeDelaySec(long attempt, long initialSec, long maxSec, double multiplier) {
+            double pow = Math.pow(multiplier, Math.max(0, attempt - 1));
+            long delay = (long) Math.ceil(initialSec * pow);
+            if (delay < 1) delay = 1;
+            return Math.min(delay, maxSec);
+        }
+
+        public void stop() {
+            stopped = true;
+            Channel ch = channel;
+            if (ch != null) {
+                log.info(StructuredLog.event("active_stopping", "eqpId", eqp.getEqpId(), "connId", ch.id().asShortText()));
+                ch.close().syncUninterruptibly();
+            }
+        }
+    }
+}
