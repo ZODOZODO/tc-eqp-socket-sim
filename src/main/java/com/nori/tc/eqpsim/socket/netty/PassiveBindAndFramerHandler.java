@@ -14,30 +14,27 @@ import org.slf4j.LoggerFactory;
 /**
  * PASSIVE 연결:
  * - EQP reserve
- * - framer 설치
- * - handshake 설치(성공 시 runner로 교체)
- * - lifecycle 설치(채널 종료 시 EQP 반환)
- * - fault state 초기화(전역 Outbound 훅 사용)
+ * - rawRx(디버그) -> framer -> handshake -> lifecycle
  */
 public class PassiveBindAndFramerHandler extends ChannelInboundHandlerAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(PassiveBindAndFramerHandler.class);
 
-    private final String listenEndpointId;
+    private final String passiveEndpointId;
     private final EqpRuntimeRegistry registry;
     private final ScenarioRegistry scenarioRegistry;
 
-    public PassiveBindAndFramerHandler(String listenEndpointId, EqpRuntimeRegistry registry, ScenarioRegistry scenarioRegistry) {
-        this.listenEndpointId = listenEndpointId;
+    public PassiveBindAndFramerHandler(String passiveEndpointId, EqpRuntimeRegistry registry, ScenarioRegistry scenarioRegistry) {
+        this.passiveEndpointId = passiveEndpointId;
         this.registry = registry;
         this.scenarioRegistry = scenarioRegistry;
     }
 
     @Override
     public void channelActive(ChannelHandlerContext ctx) {
-        String eqpId = registry.reservePassiveEqpId(listenEndpointId);
+        String eqpId = registry.reservePassiveEqpId(passiveEndpointId);
         if (eqpId == null) {
-            log.warn("PASSIVE accept but no available EQP in endpoint pool. endpointId={}", listenEndpointId);
+            log.warn("PASSIVE accept but no available EQP in endpoint pool. endpointId={}", passiveEndpointId);
             ctx.close();
             return;
         }
@@ -49,22 +46,19 @@ public class PassiveBindAndFramerHandler extends ChannelInboundHandlerAdapter {
             return;
         }
 
-        ctx.channel().attr(ChannelAttributes.ENDPOINT_ID).set(listenEndpointId);
+        ctx.channel().attr(ChannelAttributes.ENDPOINT_ID).set(passiveEndpointId);
         ctx.channel().attr(ChannelAttributes.EQP).set(eqp);
-
-        // ✅ 전역 fault 상태 초기화 (채널 단위)
         ctx.channel().attr(ChannelAttributes.FAULT_STATE).set(new FaultState());
 
-        ByteToMessageDecoder framer = SocketFramerFactory.create(eqp.getSocketType());
+        // ✅ raw bytes 로깅을 framer 앞단에 추가
+        ctx.pipeline().addFirst("rawRx", new RawInboundBytesLoggingHandler(5));
 
-        ctx.pipeline().addFirst("framer", framer);
+        ByteToMessageDecoder framer = SocketFramerFactory.create(eqp.getSocketType());
+        ctx.pipeline().addAfter("rawRx", "framer", framer);
         ctx.pipeline().addAfter("framer", "handshake", new HandshakeHandler(scenarioRegistry));
         ctx.pipeline().addLast("eqpLifecycle", new EqpLifecycleHandler(registry));
 
         ctx.pipeline().remove(this);
-
-        log.info("PASSIVE channel prepared. endpointId={}, eqpId={}, socketTypeKind={}",
-                listenEndpointId, eqp.getEqpId(), eqp.getSocketType().getKind());
 
         ctx.fireChannelActive();
     }

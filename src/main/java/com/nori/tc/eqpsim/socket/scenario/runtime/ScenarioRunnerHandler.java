@@ -17,12 +17,26 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * ScenarioRunnerHandler
+ *
+ * 핵심 수정:
+ * - emit(count=N) 전송을 스케줄링한 뒤 "시간(totalDelay)"로 next step을 예약하지 않는다.
+ * - 대신 "remaining 카운트"가 0이 되는 마지막 전송이 끝난 직후 next step으로 진행한다.
+ * - emit 전송마다 payload를 로그로 남긴다(event=scenario_emit_send).
+ *
+ * 이유:
+ * - count=1인 경우 totalDelay=0으로 인해 scenario_completed가 전송보다 먼저 실행될 수 있었음.
+ */
 public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> {
 
     private static final Logger log = LoggerFactory.getLogger(ScenarioRunnerHandler.class);
 
     private final ScenarioPlan plan;
+
+    private volatile boolean started = false;
 
     private int index = 0;
 
@@ -37,10 +51,26 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
     }
 
     @Override
+    public void handlerAdded(ChannelHandlerContext ctx) {
+        if (ctx.channel().isActive()) {
+            ctx.executor().execute(() -> startIfNeeded(ctx, "handlerAdded"));
+        }
+    }
+
+    @Override
     public void channelActive(ChannelHandlerContext ctx) {
+        startIfNeeded(ctx, "channelActive");
+        ctx.fireChannelActive();
+    }
+
+    private void startIfNeeded(ChannelHandlerContext ctx, String trigger) {
+        if (started) return;
+        started = true;
+
         EqpRuntime eqp = ctx.channel().attr(ChannelAttributes.EQP).get();
 
         log.info(StructuredLog.event("scenario_started",
+                "trigger", trigger,
                 "eqpId", eqp != null ? eqp.getEqpId() : "null",
                 "mode", eqp != null ? eqp.getMode() : "null",
                 "endpointId", eqp != null ? eqp.getEndpointId() : "null",
@@ -49,7 +79,6 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
                 "stepCount", plan.getSteps().size()));
 
         advance(ctx);
-        ctx.fireChannelActive();
     }
 
     @Override
@@ -60,12 +89,18 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
 
         String frame = msg.toString(StandardCharsets.UTF_8);
         String cmdUpper = FrameTokenParser.extractCmdUpper(frame);
-        if (cmdUpper == null) return;
 
-        if (!waiting.getExpectedCmdUpper().equals(cmdUpper)) {
-            // 예상 외 CMD 무시
-            return;
-        }
+        log.info(StructuredLog.event("scenario_rx_wait",
+                "eqpId", eqp != null ? eqp.getEqpId() : "null",
+                "connId", ctx.channel().id().asShortText(),
+                "scenarioFile", plan.getSourceFile(),
+                "stepIndex", index,
+                "expectedCmd", waiting.getExpectedCmdUpper(),
+                "cmd", cmdUpper,
+                "payload", frame));
+
+        if (cmdUpper == null) return;
+        if (!waiting.getExpectedCmdUpper().equals(cmdUpper)) return;
 
         cancelWaitTimeout();
         waiting = null;
@@ -175,7 +210,6 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
 
             if (st instanceof SleepStep sl) {
                 long ms = sl.getSleepMs();
-
                 log.info(StructuredLog.event("scenario_sleep",
                         "eqpId", eqp.getEqpId(),
                         "connId", ctx.channel().id().asShortText(),
@@ -197,7 +231,6 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
 
             if (st instanceof GotoStep g) {
                 Integer next = plan.getLabelIndex().get(g.getLabel());
-
                 log.info(StructuredLog.event("scenario_goto",
                         "eqpId", eqp.getEqpId(),
                         "connId", ctx.channel().id().asShortText(),
@@ -205,7 +238,6 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
                         "stepIndex", index,
                         "label", g.getLabel(),
                         "targetIndex", next));
-
                 index = (next != null) ? next : plan.getSteps().size();
                 continue;
             }
@@ -218,7 +250,6 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
                 if (rem >= 0) {
                     loopRemaining.put(stepIdx, rem);
                     Integer next = plan.getLabelIndex().get(lp.getGotoLabel());
-
                     log.info(StructuredLog.event("scenario_loop_jump",
                             "eqpId", eqp.getEqpId(),
                             "connId", ctx.channel().id().asShortText(),
@@ -227,7 +258,6 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
                             "gotoLabel", lp.getGotoLabel(),
                             "remaining", rem,
                             "targetIndex", next));
-
                     if (next == null) {
                         ctx.close();
                         return;
@@ -242,8 +272,7 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
             }
 
             if (st instanceof FaultStep fs) {
-                applyFault(ctx, eqp, fs);
-
+                applyFault(ctx, fs);
                 log.info(StructuredLog.event("scenario_fault",
                         "eqpId", eqp.getEqpId(),
                         "connId", ctx.channel().id().asShortText(),
@@ -251,7 +280,6 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
                         "stepIndex", index,
                         "faultType", fs.getType(),
                         "scope", fs.getScopeMode()));
-
                 index++;
                 continue;
             }
@@ -262,7 +290,6 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
                     "scenarioFile", plan.getSourceFile(),
                     "stepIndex", index,
                     "stepClass", st.getClass().getName()));
-
             ctx.close();
             return;
         }
@@ -276,9 +303,7 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
     }
 
     private void startForeverEmit(ChannelHandlerContext ctx, EqpRuntime eqp, EmitStep e) {
-        if (e.getMode() != EmitStep.Mode.INTERVAL) {
-            return;
-        }
+        if (e.getMode() != EmitStep.Mode.INTERVAL) return;
 
         final long intervalMs = e.getIntervalOrWindowMs();
         final long jitterMs = e.getJitterMs() != null ? e.getJitterMs() : 0;
@@ -290,6 +315,14 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
 
                 String resolved = ScenarioTemplateResolver.resolve(e.getPayloadTemplate(), eqp);
                 OutboundFrameSender.send(ctx, eqp, resolved);
+
+                log.info(StructuredLog.event("scenario_emit_send",
+                        "eqpId", eqp.getEqpId(),
+                        "connId", ctx.channel().id().asShortText(),
+                        "scenarioFile", plan.getSourceFile(),
+                        "stepIndex", index,
+                        "emitIndex", "forever",
+                        "payload", resolved));
 
                 long delay = intervalMs;
                 if (jitterMs > 0) {
@@ -306,41 +339,55 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
         int count = ((EmitStep.CountFixed) e.getCount()).getValue();
 
         if (e.getMode() == EmitStep.Mode.INTERVAL) {
-            scheduleIntervalFixedRate(ctx, eqp, e, count);
+            scheduleIntervalFixedRateThenContinue(ctx, eqp, e, count);
         } else {
-            scheduleWindowRandom(ctx, eqp, e, count);
+            scheduleWindowRandomThenContinue(ctx, eqp, e, count);
         }
     }
 
-    private void scheduleIntervalFixedRate(ChannelHandlerContext ctx, EqpRuntime eqp, EmitStep e, int count) {
+    private void scheduleIntervalFixedRateThenContinue(ChannelHandlerContext ctx, EqpRuntime eqp, EmitStep e, int count) {
         final long intervalMs = e.getIntervalOrWindowMs();
         final long jitterMs = e.getJitterMs() != null ? e.getJitterMs() : 0;
+
+        final AtomicInteger remaining = new AtomicInteger(count);
         final long startAt = System.currentTimeMillis();
 
         for (int i = 0; i < count; i++) {
-            final int idx = i;
-            long due = startAt + (long) idx * intervalMs;
+            final int emitIndex = i + 1;
+
+            long due = startAt + (long) i * intervalMs;
             long delay = Math.max(0, due - System.currentTimeMillis());
             if (jitterMs > 0) {
                 delay += ThreadLocalRandom.current().nextLong(0, jitterMs + 1);
             }
 
             ctx.executor().schedule(() -> {
-                if (!ctx.channel().isActive()) return;
-                String resolved = ScenarioTemplateResolver.resolve(e.getPayloadTemplate(), eqp);
-                OutboundFrameSender.send(ctx, eqp, resolved);
+                if (ctx.channel().isActive()) {
+                    String resolved = ScenarioTemplateResolver.resolve(e.getPayloadTemplate(), eqp);
+                    OutboundFrameSender.send(ctx, eqp, resolved);
+
+                    log.info(StructuredLog.event("scenario_emit_send",
+                            "eqpId", eqp.getEqpId(),
+                            "connId", ctx.channel().id().asShortText(),
+                            "scenarioFile", plan.getSourceFile(),
+                            "stepIndex", index,
+                            "emitIndex", emitIndex,
+                            "payload", resolved));
+                }
+
+                if (remaining.decrementAndGet() == 0) {
+                    ctx.executor().execute(() -> {
+                        index++;
+                        advance(ctx);
+                    });
+                }
             }, delay, TimeUnit.MILLISECONDS);
         }
-
-        long totalDelay = (long) (count - 1) * intervalMs + (jitterMs > 0 ? jitterMs : 0);
-        ctx.executor().schedule(() -> {
-            index++;
-            advance(ctx);
-        }, totalDelay, TimeUnit.MILLISECONDS);
     }
 
-    private void scheduleWindowRandom(ChannelHandlerContext ctx, EqpRuntime eqp, EmitStep e, int count) {
+    private void scheduleWindowRandomThenContinue(ChannelHandlerContext ctx, EqpRuntime eqp, EmitStep e, int count) {
         final long windowMs = e.getIntervalOrWindowMs();
+        final AtomicInteger remaining = new AtomicInteger(count);
 
         Set<Long> offsets = new LinkedHashSet<>();
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
@@ -351,21 +398,36 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
         List<Long> sorted = new ArrayList<>(offsets);
         Collections.sort(sorted);
 
+        int emitIndex = 0;
         for (long off : sorted) {
+            emitIndex++;
+            final int ei = emitIndex;
+
             ctx.executor().schedule(() -> {
-                if (!ctx.channel().isActive()) return;
-                String resolved = ScenarioTemplateResolver.resolve(e.getPayloadTemplate(), eqp);
-                OutboundFrameSender.send(ctx, eqp, resolved);
+                if (ctx.channel().isActive()) {
+                    String resolved = ScenarioTemplateResolver.resolve(e.getPayloadTemplate(), eqp);
+                    OutboundFrameSender.send(ctx, eqp, resolved);
+
+                    log.info(StructuredLog.event("scenario_emit_send",
+                            "eqpId", eqp.getEqpId(),
+                            "connId", ctx.channel().id().asShortText(),
+                            "scenarioFile", plan.getSourceFile(),
+                            "stepIndex", index,
+                            "emitIndex", ei,
+                            "payload", resolved));
+                }
+
+                if (remaining.decrementAndGet() == 0) {
+                    ctx.executor().execute(() -> {
+                        index++;
+                        advance(ctx);
+                    });
+                }
             }, off, TimeUnit.MILLISECONDS);
         }
-
-        ctx.executor().schedule(() -> {
-            index++;
-            advance(ctx);
-        }, windowMs, TimeUnit.MILLISECONDS);
     }
 
-    private void applyFault(ChannelHandlerContext ctx, EqpRuntime eqp, FaultStep fs) {
+    private void applyFault(ChannelHandlerContext ctx, FaultStep fs) {
         FaultState state = ctx.channel().attr(ChannelAttributes.FAULT_STATE).get();
         if (state == null) {
             state = new FaultState();
@@ -375,8 +437,6 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
         switch (fs.getType()) {
             case DISCONNECT -> {
                 long after = fs.getAfterMs() != null ? fs.getAfterMs() : 0;
-
-                // ✅ 반드시 void 블록 람다로 고정 (Callable 오버로드와의 모호성 제거)
                 ctx.executor().schedule(() -> { ctx.close(); }, after, TimeUnit.MILLISECONDS);
             }
             case CLEAR -> state.clearAll();

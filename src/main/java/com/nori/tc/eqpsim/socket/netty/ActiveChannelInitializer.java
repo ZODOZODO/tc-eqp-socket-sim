@@ -10,8 +10,7 @@ import io.netty.handler.codec.ByteToMessageDecoder;
 
 /**
  * ACTIVE(connect) 채널 초기화:
- * - framer + handshake(성공 시 runner로 교체)
- * - fault state 초기화(전역 Outbound 훅 사용)
+ * - rawRx(디버그) -> framer -> handshake
  */
 public class ActiveChannelInitializer extends ChannelInitializer<SocketChannel> {
 
@@ -28,11 +27,15 @@ public class ActiveChannelInitializer extends ChannelInitializer<SocketChannel> 
         ch.attr(ChannelAttributes.ENDPOINT_ID).set(eqp.getEndpointId());
         ch.attr(ChannelAttributes.EQP).set(eqp);
 
-        // ✅ 전역 fault 상태 초기화
+        // 전역 fault 상태 초기화
         ch.attr(ChannelAttributes.FAULT_STATE).set(new FaultState());
+
+        // ✅ framer 앞단 raw bytes 로깅
+        ch.pipeline().addLast("rawRx", new RawInboundBytesLoggingHandler(5));
 
         ByteToMessageDecoder framer = SocketFramerFactory.create(eqp.getSocketType());
         ch.pipeline().addLast("framer", framer);
+
         ch.pipeline().addLast("handshake", new HandshakeHandler(scenarioRegistry));
     }
 }

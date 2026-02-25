@@ -35,7 +35,8 @@ public class HandshakeHandler extends SimpleChannelInboundHandler<ByteBuf> {
     public void channelActive(ChannelHandlerContext ctx) {
         EqpRuntime eqp = ctx.channel().attr(ChannelAttributes.EQP).get();
         if (eqp == null) {
-            log.error(StructuredLog.event("handshake_start_failed", "reason", "eqp_attr_missing",
+            log.error(StructuredLog.event("handshake_start_failed",
+                    "reason", "eqp_attr_missing",
                     "connId", ctx.channel().id().asShortText()));
             ctx.close();
             return;
@@ -80,14 +81,29 @@ public class HandshakeHandler extends SimpleChannelInboundHandler<ByteBuf> {
 
         String frame = msg.toString(StandardCharsets.UTF_8);
         String cmdUpper = FrameTokenParser.extractCmdUpper(frame);
-        if (cmdUpper == null) return;
 
-        if (!CMD_INITIALIZE.equals(cmdUpper)) {
-            // 예상 외 CMD는 무시(로그 폭주 방지로 debug 미출력)
-            return;
-        }
+        // ✅ 핸드셰이크 RX 로그 (프레임이 내려오면 반드시 찍힘)
+        log.info(StructuredLog.event("handshake_rx",
+                "eqpId", eqp.getEqpId(),
+                "mode", eqp.getMode(),
+                "endpointId", eqp.getEndpointId(),
+                "connId", ctx.channel().id().asShortText(),
+                "cmd", cmdUpper,
+                "payload", frame));
+
+        if (cmdUpper == null) return;
+        if (!CMD_INITIALIZE.equals(cmdUpper)) return;
 
         String rep = "CMD=INITIALIZE_REP EQPID=" + eqp.getEqpId();
+
+        // ✅ 핸드셰이크 TX 로그
+        log.info(StructuredLog.event("handshake_tx",
+                "eqpId", eqp.getEqpId(),
+                "mode", eqp.getMode(),
+                "endpointId", eqp.getEndpointId(),
+                "connId", ctx.channel().id().asShortText(),
+                "payload", rep));
+
         OutboundFrameSender.send(ctx, eqp, rep);
 
         handshaked = true;
@@ -115,8 +131,18 @@ public class HandshakeHandler extends SimpleChannelInboundHandler<ByteBuf> {
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
         try {
-            cancelTimeout();
+            EqpRuntime eqp = ctx.channel().attr(ChannelAttributes.EQP).get();
+
+            log.warn(StructuredLog.event("handshake_channel_inactive",
+                    "eqpId", eqp != null ? eqp.getEqpId() : "null",
+                    "mode", eqp != null ? eqp.getMode() : "null",
+                    "endpointId", eqp != null ? eqp.getEndpointId() : "null",
+                    "connId", ctx.channel().id().asShortText(),
+                    "handshaked", handshaked,
+                    "remote", String.valueOf(ctx.channel().remoteAddress()),
+                    "local", String.valueOf(ctx.channel().localAddress())));
         } finally {
+            cancelTimeout();
             ctx.fireChannelInactive();
         }
     }
