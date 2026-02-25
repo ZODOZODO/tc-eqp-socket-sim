@@ -1,6 +1,7 @@
 package com.nori.tc.eqpsim.socket.netty;
 
 import com.nori.tc.eqpsim.socket.config.EndpointsProperties;
+import com.nori.tc.eqpsim.socket.lifecycle.ScenarioCompletionTracker;
 import com.nori.tc.eqpsim.socket.logging.StructuredLog;
 import com.nori.tc.eqpsim.socket.runtime.EqpRuntime;
 import com.nori.tc.eqpsim.socket.runtime.EqpRuntimeRegistry;
@@ -29,6 +30,7 @@ public class NettyTransportLifecycle implements SmartLifecycle {
     private final EqpRuntimeRegistry registry;
     private final EndpointsProperties.ActiveBackoffProperties activeBackoffProps;
     private final ScenarioRegistry scenarioRegistry;
+    private final ScenarioCompletionTracker tracker;
 
     private final Map<String, Channel> passiveServerChannels = new LinkedHashMap<>();
     private final Map<String, AtomicInteger> passiveConnCounters = new ConcurrentHashMap<>();
@@ -41,10 +43,12 @@ public class NettyTransportLifecycle implements SmartLifecycle {
 
     public NettyTransportLifecycle(EqpRuntimeRegistry registry,
                                   EndpointsProperties.ActiveBackoffProperties activeBackoffProps,
-                                  ScenarioRegistry scenarioRegistry) {
+                                  ScenarioRegistry scenarioRegistry,
+                                  ScenarioCompletionTracker tracker) {
         this.registry = registry;
         this.activeBackoffProps = activeBackoffProps;
         this.scenarioRegistry = scenarioRegistry;
+        this.tracker = (tracker == null) ? ScenarioCompletionTracker.NOOP : tracker;
     }
 
     @Override
@@ -75,7 +79,7 @@ public class NettyTransportLifecycle implements SmartLifecycle {
             ServerBootstrap b = new ServerBootstrap();
             b.group(bossGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
-                    .childHandler(new PassiveChildInitializer(endpointId, maxConn, counter, registry, scenarioRegistry))
+                    .childHandler(new PassiveChildInitializer(endpointId, maxConn, counter, registry, scenarioRegistry, tracker))
                     .childOption(ChannelOption.TCP_NODELAY, true)
                     .childOption(ChannelOption.SO_KEEPALIVE, true);
 
@@ -94,7 +98,13 @@ public class NettyTransportLifecycle implements SmartLifecycle {
 
     private void startActiveClients() {
         for (EqpRuntime eqp : registry.getActiveEqps()) {
-            ActiveClientConnector connector = new ActiveClientConnector(eqp, workerGroup, activeBackoffProps, scenarioRegistry);
+            ActiveClientConnector connector = new ActiveClientConnector(
+                    eqp,
+                    workerGroup,
+                    activeBackoffProps,
+                    scenarioRegistry,
+                    tracker
+            );
             activeConnectors.put(eqp.getEqpId(), connector);
             connector.connectNow();
         }
@@ -143,20 +153,25 @@ public class NettyTransportLifecycle implements SmartLifecycle {
         private final AtomicInteger counter;
         private final EqpRuntimeRegistry registry;
         private final ScenarioRegistry scenarioRegistry;
+        private final ScenarioCompletionTracker tracker;
 
         private PassiveChildInitializer(String endpointId, int maxConn, AtomicInteger counter,
-                                        EqpRuntimeRegistry registry, ScenarioRegistry scenarioRegistry) {
+                                        EqpRuntimeRegistry registry,
+                                        ScenarioRegistry scenarioRegistry,
+                                        ScenarioCompletionTracker tracker) {
             this.endpointId = endpointId;
             this.maxConn = maxConn;
             this.counter = counter;
             this.registry = registry;
             this.scenarioRegistry = scenarioRegistry;
+            this.tracker = tracker;
         }
 
         @Override
         protected void initChannel(SocketChannel ch) {
             ch.pipeline().addLast("connLimit", new ConnectionLimitHandler(maxConn, counter));
-            ch.pipeline().addLast("passiveBind", new PassiveBindAndFramerHandler(endpointId, registry, scenarioRegistry));
+            ch.pipeline().addLast("passiveBind",
+                    new PassiveBindAndFramerHandler(endpointId, registry, scenarioRegistry, tracker));
         }
     }
 
@@ -166,7 +181,6 @@ public class NettyTransportLifecycle implements SmartLifecycle {
         private final EqpRuntime eqp;
         private final EventLoopGroup group;
         private final EndpointsProperties.ActiveBackoffProperties backoff;
-
         private final Bootstrap bootstrap;
 
         private volatile boolean stopped = false;
@@ -176,17 +190,19 @@ public class NettyTransportLifecycle implements SmartLifecycle {
         private ActiveClientConnector(EqpRuntime eqp,
                                       EventLoopGroup group,
                                       EndpointsProperties.ActiveBackoffProperties backoff,
-                                      ScenarioRegistry scenarioRegistry) {
+                                      ScenarioRegistry scenarioRegistry,
+                                      ScenarioCompletionTracker tracker) {
             this.eqp = eqp;
             this.group = group;
             this.backoff = backoff;
 
+            // ✅ scenarioRegistry/tracker는 필드로 들고 있지 않고 즉시 handler 생성에만 사용
             this.bootstrap = new Bootstrap();
             bootstrap.group(group)
                     .channel(NioSocketChannel.class)
                     .option(ChannelOption.TCP_NODELAY, true)
                     .option(ChannelOption.SO_KEEPALIVE, true)
-                    .handler(new ActiveChannelInitializer(eqp, scenarioRegistry));
+                    .handler(new ActiveChannelInitializer(eqp, scenarioRegistry, tracker));
         }
 
         public String getEqpId() { return eqp.getEqpId(); }
@@ -225,7 +241,6 @@ public class NettyTransportLifecycle implements SmartLifecycle {
 
                     String reason = channel.attr(ChannelAttributes.CLOSE_REASON).get();
                     if (ChannelAttributes.CLOSE_REASON_SCENARIO_COMPLETED.equals(reason)) {
-                        // ✅ 종료 정책 A: 시나리오 완료로 닫힌 경우 재연결 금지(완전 종료)
                         log.info(StructuredLog.event("active_closed_no_reconnect",
                                 "eqpId", eqp.getEqpId(),
                                 "connId", channel.id().asShortText(),

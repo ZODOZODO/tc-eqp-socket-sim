@@ -13,32 +13,20 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
-/**
- * EqpRuntimeRegistry
- *
- * endpoints 키 통일:
- * - endpoints.passive / endpoints.active / endpoints.active-backoff
- */
 public final class EqpRuntimeRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(EqpRuntimeRegistry.class);
 
     private final Map<String, EqpRuntime> eqpById;
 
-    // PASSIVE endpointId -> available EQP IDs
     private final Map<String, ConcurrentLinkedQueue<String>> passiveAvailableByEndpoint;
-
-    // ACTIVE EQP 목록(고정)
     private final List<EqpRuntime> activeEqps;
 
-    // PASSIVE endpointId -> bind address + maxConn
     private final Map<String, HostPort> passiveBindById;
     private final Map<String, Integer> passiveMaxConnById;
 
-    // ACTIVE endpointId -> target address
     private final Map<String, HostPort> activeTargetById;
 
-    // (진단용) endpoint별 ACTIVE EQP 수
     private final Map<String, Integer> activeEqpCountByEndpoint;
 
     public EqpRuntimeRegistry(TcEqpSimProperties props) {
@@ -53,7 +41,6 @@ public final class EqpRuntimeRegistry {
 
         EndpointsProperties endpoints = Objects.requireNonNull(props.getEndpoints(), "endpoints must not be null");
 
-        // endpoints.passive
         for (Map.Entry<String, EndpointsProperties.PassiveEndpointProperties> e : orEmpty(endpoints.getPassive()).entrySet()) {
             String id = e.getKey();
             EndpointsProperties.PassiveEndpointProperties v = e.getValue();
@@ -64,7 +51,6 @@ public final class EqpRuntimeRegistry {
             passiveMaxConnById.put(id, v.getMaxConn());
         }
 
-        // endpoints.active
         for (Map.Entry<String, EndpointsProperties.ActiveEndpointProperties> e : orEmpty(endpoints.getActive()).entrySet()) {
             String id = e.getKey();
             EndpointsProperties.ActiveEndpointProperties v = e.getValue();
@@ -156,7 +142,6 @@ public final class EqpRuntimeRegistry {
                 "passiveEndpointCount", passiveAvailableByEndpoint.size(),
                 "activeEqpCount", activeEqps.size()));
 
-        // 진단: active endpoint connCount vs 실제 참조 ACTIVE EQP 수
         for (Map.Entry<String, EndpointsProperties.ActiveEndpointProperties> e : orEmpty(endpoints.getActive()).entrySet()) {
             String endpointId = e.getKey();
             int configured = (e.getValue() != null) ? e.getValue().getConnCount() : 0;
@@ -168,6 +153,10 @@ public final class EqpRuntimeRegistry {
                         "activeEqpRefCount", actual));
             }
         }
+    }
+
+    public int getTotalEqpCount() {
+        return eqpById.size();
     }
 
     public Map<String, HostPort> getPassiveBindById() {

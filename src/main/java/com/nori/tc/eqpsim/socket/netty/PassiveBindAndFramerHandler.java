@@ -1,6 +1,7 @@
 package com.nori.tc.eqpsim.socket.netty;
 
 import com.nori.tc.eqpsim.socket.framing.SocketFramerFactory;
+import com.nori.tc.eqpsim.socket.lifecycle.ScenarioCompletionTracker;
 import com.nori.tc.eqpsim.socket.runtime.EqpRuntime;
 import com.nori.tc.eqpsim.socket.runtime.EqpRuntimeRegistry;
 import com.nori.tc.eqpsim.socket.scenario.ScenarioRegistry;
@@ -11,11 +12,6 @@ import io.netty.handler.codec.ByteToMessageDecoder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/**
- * PASSIVE 연결:
- * - EQP reserve
- * - rawRx(디버그) -> framer -> handshake -> lifecycle
- */
 public class PassiveBindAndFramerHandler extends ChannelInboundHandlerAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(PassiveBindAndFramerHandler.class);
@@ -23,11 +19,22 @@ public class PassiveBindAndFramerHandler extends ChannelInboundHandlerAdapter {
     private final String passiveEndpointId;
     private final EqpRuntimeRegistry registry;
     private final ScenarioRegistry scenarioRegistry;
+    private final ScenarioCompletionTracker tracker;
 
-    public PassiveBindAndFramerHandler(String passiveEndpointId, EqpRuntimeRegistry registry, ScenarioRegistry scenarioRegistry) {
+    public PassiveBindAndFramerHandler(String passiveEndpointId,
+                                      EqpRuntimeRegistry registry,
+                                      ScenarioRegistry scenarioRegistry) {
+        this(passiveEndpointId, registry, scenarioRegistry, ScenarioCompletionTracker.NOOP);
+    }
+
+    public PassiveBindAndFramerHandler(String passiveEndpointId,
+                                      EqpRuntimeRegistry registry,
+                                      ScenarioRegistry scenarioRegistry,
+                                      ScenarioCompletionTracker tracker) {
         this.passiveEndpointId = passiveEndpointId;
         this.registry = registry;
         this.scenarioRegistry = scenarioRegistry;
+        this.tracker = tracker == null ? ScenarioCompletionTracker.NOOP : tracker;
     }
 
     @Override
@@ -50,16 +57,15 @@ public class PassiveBindAndFramerHandler extends ChannelInboundHandlerAdapter {
         ctx.channel().attr(ChannelAttributes.EQP).set(eqp);
         ctx.channel().attr(ChannelAttributes.FAULT_STATE).set(new FaultState());
 
-        // ✅ raw bytes 로깅을 framer 앞단에 추가
         ctx.pipeline().addFirst("rawRx", new RawInboundBytesLoggingHandler(5));
 
         ByteToMessageDecoder framer = SocketFramerFactory.create(eqp.getSocketType());
         ctx.pipeline().addAfter("rawRx", "framer", framer);
-        ctx.pipeline().addAfter("framer", "handshake", new HandshakeHandler(scenarioRegistry));
-        ctx.pipeline().addLast("eqpLifecycle", new EqpLifecycleHandler(registry));
+
+        ctx.pipeline().addAfter("framer", "handshake", new HandshakeHandler(scenarioRegistry, tracker));
+        ctx.pipeline().addLast("eqpLifecycle", new EqpLifecycleHandler(registry, tracker));
 
         ctx.pipeline().remove(this);
-
         ctx.fireChannelActive();
     }
 }

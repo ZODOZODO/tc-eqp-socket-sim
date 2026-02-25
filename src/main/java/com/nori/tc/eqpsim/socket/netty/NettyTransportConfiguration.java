@@ -1,6 +1,7 @@
 package com.nori.tc.eqpsim.socket.netty;
 
 import com.nori.tc.eqpsim.socket.config.TcEqpSimProperties;
+import com.nori.tc.eqpsim.socket.lifecycle.ScenarioCompletionTracker;
 import com.nori.tc.eqpsim.socket.runtime.EqpRuntimeRegistry;
 import com.nori.tc.eqpsim.socket.scenario.ScenarioRegistry;
 import org.springframework.context.annotation.Bean;
@@ -22,7 +23,8 @@ public class NettyTransportConfiguration {
     @Bean
     public NettyTransportLifecycle nettyTransportLifecycle(EqpRuntimeRegistry registry,
                                                            TcEqpSimProperties props,
-                                                           ScenarioRegistry scenarioRegistry) {
-        return new NettyTransportLifecycle(registry, props.getEndpoints().getActiveBackoff(), scenarioRegistry);
+                                                           ScenarioRegistry scenarioRegistry,
+                                                           ScenarioCompletionTracker tracker) {
+        return new NettyTransportLifecycle(registry, props.getEndpoints().getActiveBackoff(), scenarioRegistry, tracker);
     }
 }

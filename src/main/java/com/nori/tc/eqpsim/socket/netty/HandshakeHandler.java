@@ -1,5 +1,7 @@
 package com.nori.tc.eqpsim.socket.netty;
 
+import com.nori.tc.eqpsim.socket.config.EqpProperties;
+import com.nori.tc.eqpsim.socket.lifecycle.ScenarioCompletionTracker;
 import com.nori.tc.eqpsim.socket.logging.StructuredLog;
 import com.nori.tc.eqpsim.socket.protocol.FrameTokenParser;
 import com.nori.tc.eqpsim.socket.runtime.EqpRuntime;
@@ -16,19 +18,31 @@ import org.slf4j.LoggerFactory;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * HandshakeHandler
+ *
+ * ✅ 구버전 생성자(ScenarioRegistry만)도 제공해서 테스트/기존 코드가 깨지지 않게 함.
+ */
 public class HandshakeHandler extends SimpleChannelInboundHandler<ByteBuf> {
 
     private static final Logger log = LoggerFactory.getLogger(HandshakeHandler.class);
     private static final String CMD_INITIALIZE = "INITIALIZE";
 
     private final ScenarioRegistry scenarioRegistry;
+    private final ScenarioCompletionTracker tracker;
 
     private volatile boolean handshaked = false;
     private ScheduledFuture<?> timeoutFuture;
 
     public HandshakeHandler(ScenarioRegistry scenarioRegistry) {
+        this(scenarioRegistry, ScenarioCompletionTracker.NOOP);
+    }
+
+    public HandshakeHandler(ScenarioRegistry scenarioRegistry,
+                            ScenarioCompletionTracker tracker) {
         super(true);
         this.scenarioRegistry = scenarioRegistry;
+        this.tracker = tracker == null ? ScenarioCompletionTracker.NOOP : tracker;
     }
 
     @Override
@@ -82,7 +96,6 @@ public class HandshakeHandler extends SimpleChannelInboundHandler<ByteBuf> {
         String frame = msg.toString(StandardCharsets.UTF_8);
         String cmdUpper = FrameTokenParser.extractCmdUpper(frame);
 
-        // ✅ 핸드셰이크 RX 로그 (프레임이 내려오면 반드시 찍힘)
         log.info(StructuredLog.event("handshake_rx",
                 "eqpId", eqp.getEqpId(),
                 "mode", eqp.getMode(),
@@ -96,7 +109,6 @@ public class HandshakeHandler extends SimpleChannelInboundHandler<ByteBuf> {
 
         String rep = "CMD=INITIALIZE_REP EQPID=" + eqp.getEqpId();
 
-        // ✅ 핸드셰이크 TX 로그
         log.info(StructuredLog.event("handshake_tx",
                 "eqpId", eqp.getEqpId(),
                 "mode", eqp.getMode(),
@@ -115,6 +127,11 @@ public class HandshakeHandler extends SimpleChannelInboundHandler<ByteBuf> {
                 "endpointId", eqp.getEndpointId(),
                 "connId", ctx.channel().id().asShortText()));
 
+        // PASSIVE는 TC가 끊을 때까지 open으로 추적
+        if (eqp.getMode() == EqpProperties.Mode.PASSIVE) {
+            tracker.markPassiveChannelOpened(eqp.getEqpId());
+        }
+
         ScenarioPlan plan = scenarioRegistry.getPlanByProfileId(eqp.getProfileId());
         if (plan == null) {
             log.error(StructuredLog.event("scenario_plan_missing",
@@ -125,24 +142,14 @@ public class HandshakeHandler extends SimpleChannelInboundHandler<ByteBuf> {
             return;
         }
 
-        ctx.pipeline().replace(this, "runner", new ScenarioRunnerHandler(plan));
+        ctx.pipeline().replace(this, "runner", new ScenarioRunnerHandler(plan, tracker));
     }
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
         try {
-            EqpRuntime eqp = ctx.channel().attr(ChannelAttributes.EQP).get();
-
-            log.warn(StructuredLog.event("handshake_channel_inactive",
-                    "eqpId", eqp != null ? eqp.getEqpId() : "null",
-                    "mode", eqp != null ? eqp.getMode() : "null",
-                    "endpointId", eqp != null ? eqp.getEndpointId() : "null",
-                    "connId", ctx.channel().id().asShortText(),
-                    "handshaked", handshaked,
-                    "remote", String.valueOf(ctx.channel().remoteAddress()),
-                    "local", String.valueOf(ctx.channel().localAddress())));
-        } finally {
             cancelTimeout();
+        } finally {
             ctx.fireChannelInactive();
         }
     }
