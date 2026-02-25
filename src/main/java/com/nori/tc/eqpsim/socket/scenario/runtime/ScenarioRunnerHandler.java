@@ -22,21 +22,25 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * ScenarioRunnerHandler
  *
- * 핵심 수정:
- * - emit(count=N) 전송을 스케줄링한 뒤 "시간(totalDelay)"로 next step을 예약하지 않는다.
- * - 대신 "remaining 카운트"가 0이 되는 마지막 전송이 끝난 직후 next step으로 진행한다.
- * - emit 전송마다 payload를 로그로 남긴다(event=scenario_emit_send).
- *
- * 이유:
- * - count=1인 경우 totalDelay=0으로 인해 scenario_completed가 전송보다 먼저 실행될 수 있었음.
+ * 변경점(요구사항 반영):
+ * - 시나리오가 정상 완료(scenario_completed)되면 연결을 정상 종료한다.
+ *   - 마지막 송신(writeAndFlush) 직후 즉시 close하면 경쟁 조건이 있을 수 있으므로
+ *     짧은 지연 후 close를 예약한다.
  */
 public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> {
 
     private static final Logger log = LoggerFactory.getLogger(ScenarioRunnerHandler.class);
 
+    /**
+     * 정상 완료 후 close 지연(ms)
+     * - 마지막 writeAndFlush가 이벤트루프에서 처리될 시간을 조금 준다.
+     */
+    private static final long CLOSE_GRACE_MS = 100;
+
     private final ScenarioPlan plan;
 
     private volatile boolean started = false;
+    private volatile boolean closeScheduled = false;
 
     private int index = 0;
 
@@ -138,6 +142,9 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
                         "eqpId", eqp.getEqpId(),
                         "connId", ctx.channel().id().asShortText(),
                         "scenarioFile", plan.getSourceFile()));
+
+                // ✅ 정상 완료 시 정상 종료
+                scheduleCloseAfterCompletion(ctx, eqp);
                 return;
             }
 
@@ -293,6 +300,26 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
             ctx.close();
             return;
         }
+    }
+
+    private void scheduleCloseAfterCompletion(ChannelHandlerContext ctx, EqpRuntime eqp) {
+        if (closeScheduled) {
+            return;
+        }
+        closeScheduled = true;
+
+        log.info(StructuredLog.event("scenario_close_scheduled",
+                "eqpId", eqp.getEqpId(),
+                "connId", ctx.channel().id().asShortText(),
+                "scenarioFile", plan.getSourceFile(),
+                "delayMs", CLOSE_GRACE_MS));
+
+        ctx.executor().schedule(() -> {
+            // schedule 오버로드 모호성 방지: void 블록 람다
+            if (ctx.channel().isActive()) {
+                ctx.close();
+            }
+        }, CLOSE_GRACE_MS, TimeUnit.MILLISECONDS);
     }
 
     private void cancelWaitTimeout() {
