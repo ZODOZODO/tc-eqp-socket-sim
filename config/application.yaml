@@ -42,13 +42,13 @@ tc:
 
       active:
         A1:
-          target: "127.0.0.1:6001"
-          conn-count: 20
-        A1:
-          target: "127.0.0.1:6002"
+          target: "192.168.0.14:6101"
           conn-count: 20
         A2:
-          target: "127.0.0.1:6003"
+          target: "192.168.0.14:6101"
+          conn-count: 20
+        A3:
+          target: "192.168.0.14:6103"
           conn-count: 20
 
       active-backoff:
