@@ -41,17 +41,14 @@ tc:
           max-conn: 20
 
       active:
-        A0:
+        A1:
           target: "127.0.0.1:6001"
           conn-count: 20
         A1:
-          target: "127.0.0.1:32001"
+          target: "127.0.0.1:6002"
           conn-count: 20
         A2:
-          target: "127.0.0.1:32002"
-          conn-count: 20
-        A3:
-          target: "127.0.0.1:32003"
+          target: "127.0.0.1:6003"
           conn-count: 20
 
       active-backoff:
@@ -113,7 +110,7 @@ tc:
       # ACTIVE (시뮬레이터가 TC로 접속)
       SOCKET_P01:
         mode: ACTIVE
-        endpoint: A0
+        endpoint: A1
         socket-type: LINE_LF
         profile: scenario_trace_case1
         vars:
