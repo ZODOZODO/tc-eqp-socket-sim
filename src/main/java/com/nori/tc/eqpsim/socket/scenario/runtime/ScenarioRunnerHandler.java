@@ -22,18 +22,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * ScenarioRunnerHandler
  *
- * 변경점(요구사항 반영):
- * - 시나리오가 정상 완료(scenario_completed)되면 연결을 정상 종료한다.
- *   - 마지막 송신(writeAndFlush) 직후 즉시 close하면 경쟁 조건이 있을 수 있으므로
- *     짧은 지연 후 close를 예약한다.
+ * 종료 정책(A):
+ * - 시나리오 정상 완료 시 채널을 정상 close
+ * - close 직전에 CLOSE_REASON=SCENARIO_COMPLETED를 채널 attribute로 기록
+ *   (ACTIVE 재연결 차단 판단용)
  */
 public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> {
 
     private static final Logger log = LoggerFactory.getLogger(ScenarioRunnerHandler.class);
 
     /**
-     * 정상 완료 후 close 지연(ms)
-     * - 마지막 writeAndFlush가 이벤트루프에서 처리될 시간을 조금 준다.
+     * 마지막 writeAndFlush가 처리될 시간을 조금 주기 위한 지연(ms)
      */
     private static final long CLOSE_GRACE_MS = 100;
 
@@ -143,7 +142,7 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
                         "connId", ctx.channel().id().asShortText(),
                         "scenarioFile", plan.getSourceFile()));
 
-                // ✅ 정상 완료 시 정상 종료
+                // ✅ 정상 완료 → 정상 종료(A)
                 scheduleCloseAfterCompletion(ctx, eqp);
                 return;
             }
@@ -303,19 +302,20 @@ public class ScenarioRunnerHandler extends SimpleChannelInboundHandler<ByteBuf> 
     }
 
     private void scheduleCloseAfterCompletion(ChannelHandlerContext ctx, EqpRuntime eqp) {
-        if (closeScheduled) {
-            return;
-        }
+        if (closeScheduled) return;
         closeScheduled = true;
+
+        // ✅ ACTIVE 재연결 차단 판단용 close reason 기록
+        ctx.channel().attr(ChannelAttributes.CLOSE_REASON).set(ChannelAttributes.CLOSE_REASON_SCENARIO_COMPLETED);
 
         log.info(StructuredLog.event("scenario_close_scheduled",
                 "eqpId", eqp.getEqpId(),
                 "connId", ctx.channel().id().asShortText(),
                 "scenarioFile", plan.getSourceFile(),
-                "delayMs", CLOSE_GRACE_MS));
+                "delayMs", CLOSE_GRACE_MS,
+                "closeReason", ChannelAttributes.CLOSE_REASON_SCENARIO_COMPLETED));
 
         ctx.executor().schedule(() -> {
-            // schedule 오버로드 모호성 방지: void 블록 람다
             if (ctx.channel().isActive()) {
                 ctx.close();
             }

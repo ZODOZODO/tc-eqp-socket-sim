@@ -65,7 +65,7 @@ public class NettyTransportLifecycle implements SmartLifecycle {
 
     private void startPassiveServers() {
         for (Map.Entry<String, HostPort> e : registry.getPassiveBindById().entrySet()) {
-            String endpointId = e.getKey(); // P1/P2...
+            String endpointId = e.getKey();
             HostPort bind = e.getValue();
             int maxConn = registry.getPassiveMaxConnById().getOrDefault(endpointId, 20);
 
@@ -222,6 +222,18 @@ public class NettyTransportLifecycle implements SmartLifecycle {
 
                 channel.closeFuture().addListener((ChannelFutureListener) cf -> {
                     if (stopped) return;
+
+                    String reason = channel.attr(ChannelAttributes.CLOSE_REASON).get();
+                    if (ChannelAttributes.CLOSE_REASON_SCENARIO_COMPLETED.equals(reason)) {
+                        // ✅ 종료 정책 A: 시나리오 완료로 닫힌 경우 재연결 금지(완전 종료)
+                        log.info(StructuredLog.event("active_closed_no_reconnect",
+                                "eqpId", eqp.getEqpId(),
+                                "connId", channel.id().asShortText(),
+                                "closeReason", reason));
+                        stopped = true;
+                        return;
+                    }
+
                     scheduleReconnect("channel_closed");
                 });
             });
@@ -251,7 +263,9 @@ public class NettyTransportLifecycle implements SmartLifecycle {
             stopped = true;
             Channel ch = channel;
             if (ch != null) {
-                log.info(StructuredLog.event("active_stopping", "eqpId", eqp.getEqpId(), "connId", ch.id().asShortText()));
+                log.info(StructuredLog.event("active_stopping",
+                        "eqpId", eqp.getEqpId(),
+                        "connId", ch.id().asShortText()));
                 ch.close().syncUninterruptibly();
             }
         }

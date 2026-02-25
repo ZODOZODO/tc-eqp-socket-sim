@@ -6,10 +6,6 @@ import io.netty.util.AttributeKey;
 
 /**
  * Netty Channel Attribute Keys
- *
- * - ENDPOINT_ID: listen/connect endpoint id
- * - EQP: 바인딩된 가상 설비 런타임 정의(EqpRuntime)
- * - FAULT_STATE: 채널 단위 장애/스트레스 주입 상태(전역 Outbound 훅에서 사용)
  */
 public final class ChannelAttributes {
 
@@ -21,8 +17,19 @@ public final class ChannelAttributes {
     public static final AttributeKey<EqpRuntime> EQP = AttributeKey.valueOf("tc.eqpsim.eqp");
 
     /**
-     * 전역 장애 상태(채널 단위)
-     * - Handshake/Scenario 등 "모든 outbound"에서 공통 사용
+     * 채널 단위 장애 주입 상태
      */
     public static final AttributeKey<FaultState> FAULT_STATE = AttributeKey.valueOf("tc.eqpsim.faultState");
+
+    /**
+     * 채널 종료 사유(정상/비정상)
+     * - ScenarioRunner가 정상 완료 후 close 시 값을 넣는다.
+     * - ActiveClientConnector는 이 값이 SCENARIO_COMPLETED면 재연결하지 않는다.
+     */
+    public static final AttributeKey<String> CLOSE_REASON = AttributeKey.valueOf("tc.eqpsim.closeReason");
+
+    /**
+     * 시나리오 정상 완료로 인한 정상 종료
+     */
+    public static final String CLOSE_REASON_SCENARIO_COMPLETED = "SCENARIO_COMPLETED";
 }
