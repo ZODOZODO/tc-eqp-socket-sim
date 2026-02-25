@@ -11,9 +11,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 
-/**
- * PASSIVE 채널 종료 시 EQP pool 반환.
- */
 public class EqpLifecycleHandler extends ChannelInboundHandlerAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(EqpLifecycleHandler.class);

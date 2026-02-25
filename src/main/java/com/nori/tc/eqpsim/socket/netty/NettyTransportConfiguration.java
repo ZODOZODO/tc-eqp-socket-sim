@@ -6,9 +6,6 @@ import com.nori.tc.eqpsim.socket.scenario.ScenarioRegistry;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-/**
- * Netty + Scenario 구성
- */
 @Configuration
 public class NettyTransportConfiguration {
 
@@ -26,6 +23,6 @@ public class NettyTransportConfiguration {
     public NettyTransportLifecycle nettyTransportLifecycle(EqpRuntimeRegistry registry,
                                                            TcEqpSimProperties props,
                                                            ScenarioRegistry scenarioRegistry) {
-        return new NettyTransportLifecycle(registry, props.getEndpoints().getConnectBackoff(), scenarioRegistry);
+        return new NettyTransportLifecycle(registry, props.getEndpoints().getActiveBackoff(), scenarioRegistry);
     }
 }

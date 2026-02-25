@@ -27,11 +27,11 @@ public class NettyTransportLifecycle implements SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(NettyTransportLifecycle.class);
 
     private final EqpRuntimeRegistry registry;
-    private final EndpointsProperties.ConnectBackoffProperties backoffProps;
+    private final EndpointsProperties.ActiveBackoffProperties activeBackoffProps;
     private final ScenarioRegistry scenarioRegistry;
 
-    private final Map<String, Channel> listenServerChannels = new LinkedHashMap<>();
-    private final Map<String, AtomicInteger> listenConnCounters = new ConcurrentHashMap<>();
+    private final Map<String, Channel> passiveServerChannels = new LinkedHashMap<>();
+    private final Map<String, AtomicInteger> passiveConnCounters = new ConcurrentHashMap<>();
     private final Map<String, ActiveClientConnector> activeConnectors = new LinkedHashMap<>();
 
     private EventLoopGroup bossGroup;
@@ -40,10 +40,10 @@ public class NettyTransportLifecycle implements SmartLifecycle {
     private volatile boolean running = false;
 
     public NettyTransportLifecycle(EqpRuntimeRegistry registry,
-                                  EndpointsProperties.ConnectBackoffProperties backoffProps,
+                                  EndpointsProperties.ActiveBackoffProperties activeBackoffProps,
                                   ScenarioRegistry scenarioRegistry) {
         this.registry = registry;
-        this.backoffProps = backoffProps;
+        this.activeBackoffProps = activeBackoffProps;
         this.scenarioRegistry = scenarioRegistry;
     }
 
@@ -54,23 +54,23 @@ public class NettyTransportLifecycle implements SmartLifecycle {
         this.bossGroup = new NioEventLoopGroup(1);
         this.workerGroup = new NioEventLoopGroup();
 
-        startListenServers();
+        startPassiveServers();
         startActiveClients();
 
         running = true;
         log.info(StructuredLog.event("transport_started",
-                "listenServerCount", listenServerChannels.size(),
+                "passiveServerCount", passiveServerChannels.size(),
                 "activeClientCount", activeConnectors.size()));
     }
 
-    private void startListenServers() {
-        for (Map.Entry<String, HostPort> e : registry.getListenBindById().entrySet()) {
-            String endpointId = e.getKey();
+    private void startPassiveServers() {
+        for (Map.Entry<String, HostPort> e : registry.getPassiveBindById().entrySet()) {
+            String endpointId = e.getKey(); // P1/P2...
             HostPort bind = e.getValue();
-            int maxConn = registry.getListenMaxConnById().getOrDefault(endpointId, 20);
+            int maxConn = registry.getPassiveMaxConnById().getOrDefault(endpointId, 20);
 
             AtomicInteger counter = new AtomicInteger(0);
-            listenConnCounters.put(endpointId, counter);
+            passiveConnCounters.put(endpointId, counter);
 
             ServerBootstrap b = new ServerBootstrap();
             b.group(bossGroup, workerGroup)
@@ -81,11 +81,11 @@ public class NettyTransportLifecycle implements SmartLifecycle {
 
             ChannelFuture f = b.bind(bind.host(), bind.port()).syncUninterruptibly();
             if (!f.isSuccess()) {
-                throw new IllegalStateException("Failed to bind listen endpoint " + endpointId + " at " + bind, f.cause());
+                throw new IllegalStateException("Failed to bind passive endpoint " + endpointId + " at " + bind, f.cause());
             }
-            listenServerChannels.put(endpointId, f.channel());
+            passiveServerChannels.put(endpointId, f.channel());
 
-            log.info(StructuredLog.event("listen_started",
+            log.info(StructuredLog.event("passive_bind_started",
                     "endpointId", endpointId,
                     "bind", bind.host() + ":" + bind.port(),
                     "maxConn", maxConn));
@@ -94,7 +94,7 @@ public class NettyTransportLifecycle implements SmartLifecycle {
 
     private void startActiveClients() {
         for (EqpRuntime eqp : registry.getActiveEqps()) {
-            ActiveClientConnector connector = new ActiveClientConnector(eqp, workerGroup, backoffProps, scenarioRegistry);
+            ActiveClientConnector connector = new ActiveClientConnector(eqp, workerGroup, activeBackoffProps, scenarioRegistry);
             activeConnectors.put(eqp.getEqpId(), connector);
             connector.connectNow();
         }
@@ -113,12 +113,12 @@ public class NettyTransportLifecycle implements SmartLifecycle {
         }
         activeConnectors.clear();
 
-        for (Map.Entry<String, Channel> e : listenServerChannels.entrySet()) {
+        for (Map.Entry<String, Channel> e : passiveServerChannels.entrySet()) {
             try { e.getValue().close().syncUninterruptibly(); } catch (Exception ex) {
-                log.warn(StructuredLog.event("listen_close_failed", "endpointId", e.getKey()), ex);
+                log.warn(StructuredLog.event("passive_close_failed", "endpointId", e.getKey()), ex);
             }
         }
-        listenServerChannels.clear();
+        passiveServerChannels.clear();
 
         if (bossGroup != null) bossGroup.shutdownGracefully().syncUninterruptibly();
         if (workerGroup != null) workerGroup.shutdownGracefully().syncUninterruptibly();
@@ -165,7 +165,7 @@ public class NettyTransportLifecycle implements SmartLifecycle {
 
         private final EqpRuntime eqp;
         private final EventLoopGroup group;
-        private final EndpointsProperties.ConnectBackoffProperties backoff;
+        private final EndpointsProperties.ActiveBackoffProperties backoff;
 
         private final Bootstrap bootstrap;
 
@@ -175,7 +175,7 @@ public class NettyTransportLifecycle implements SmartLifecycle {
 
         private ActiveClientConnector(EqpRuntime eqp,
                                       EventLoopGroup group,
-                                      EndpointsProperties.ConnectBackoffProperties backoff,
+                                      EndpointsProperties.ActiveBackoffProperties backoff,
                                       ScenarioRegistry scenarioRegistry) {
             this.eqp = eqp;
             this.group = group;

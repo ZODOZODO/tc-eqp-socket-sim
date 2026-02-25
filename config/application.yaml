@@ -29,29 +29,32 @@ tc:
 
     # endpoint 정의
     endpoints:
-      listen:
-        L1:
+      passive:
+        P1:
           bind: "0.0.0.0:31001"
           max-conn: 20
-        L2:
+        P2:
           bind: "0.0.0.0:31002"
           max-conn: 20
-        L3:
+        P3:
           bind: "0.0.0.0:31003"
           max-conn: 20
 
-      connect:
-        C1:
+      active:
+        A0:
+          target: "127.0.0.1:6001"
+          conn-count: 20
+        A1:
           target: "127.0.0.1:32001"
           conn-count: 20
-        C2:
+        A2:
           target: "127.0.0.1:32002"
           conn-count: 20
-        C3:
+        A3:
           target: "127.0.0.1:32003"
           conn-count: 20
 
-      connect-backoff:
+      active-backoff:
         initial-sec: 1
         max-sec: 30
         multiplier: 2.0
@@ -62,6 +65,10 @@ tc:
         type: SCENARIO
         scenario-file: "config/scenario/normal_scenario_case1.md"
 
+      scenario_trace_case1:
+        type: SCENARIO
+        scenario-file: "config/scenario/trace_scenario_case1.md"
+
       scenario_fault_disconnect:
         type: SCENARIO
         scenario-file: "config/scenario/fault_disconnect_case1.md"
@@ -70,57 +77,80 @@ tc:
     # - 실제 120대/60대 구성은 아래 tools/gen-eqps.ps1로 생성하는 것을 권장
     eqps:
       # PASSIVE (TC가 접속)
-      TEST001:
-        mode: PASSIVE
-        endpoint: L1
-        socket-type: LINE_LF
-        profile: scenario_case1
-        vars:
-          lotid: "TESTLOT01"
-          stepid: "TESTSTEP01"
+      # TEST101:
+      #   mode: PASSIVE
+      #   endpoint: P1
+      #   socket-type: LINE_LF
+      #   profile: scenario_case1
+      #   vars:
+      #     lotid: "TESTLOT101"
+      #     carid: "TESTCAR101"
+      #     portid: "1"
+      #     portstatus: "IDLE"
 
-      TEST002:
-        mode: PASSIVE
-        endpoint: L1
-        socket-type: LINE_LF
-        profile: scenario_fault_disconnect
-        vars:
-          lotid: "TESTLOT02"
-          stepid: "TESTSTEP02"
+      # TEST102:
+      #   mode: PASSIVE
+      #   endpoint: P2
+      #   socket-type: LINE_CR
+      #   profile: scenario_fault_disconnect
+      #   vars:
+      #     lotid: "TESTLOT102"
+      #     carid: "TESTCAR102"
+      #     portid: "1"
+      #     portstatus: "IDLE"
 
-      TEST021:
-        mode: PASSIVE
-        endpoint: L2
-        socket-type: LINE_LF
-        profile: scenario_case1
-        vars:
-          lotid: "TESTLOT21"
-          stepid: "TESTSTEP21"
+      # TEST103:
+      #   mode: PASSIVE
+      #   endpoint: P3
+      #   socket-type: LINE_CRLF
+      #   profile: scenario_case1
+      #   vars:
+      #     lotid: "TESTLOT103"
+      #     carid: "TESTCAR103"
+      #     portid: "1"
+      #     portstatus: "IDLE"
 
       # ACTIVE (시뮬레이터가 TC로 접속)
-      TEST061:
+      SOCKET_P01:
         mode: ACTIVE
-        endpoint: C1
+        endpoint: A0
         socket-type: LINE_LF
-        profile: scenario_case1
+        profile: scenario_trace_case1
         vars:
-          lotid: "TESTLOT61"
-          stepid: "TESTSTEP61"
+          lotid: "TESTLOT201"
+          carid: "TESTCAR201"
+          portid: "1"
+          portstatus: "IDLE"
 
-      TEST062:
-        mode: ACTIVE
-        endpoint: C1
-        socket-type: LINE_LF
-        profile: scenario_case1
-        vars:
-          lotid: "TESTLOT62"
-          stepid: "TESTSTEP62"
+      # TEST201:
+      #   mode: ACTIVE
+      #   endpoint: A1
+      #   socket-type: LINE_LF
+      #   profile: scenario_case1
+      #   vars:
+      #     lotid: "TESTLOT201"
+      #     carid: "TESTCAR201"
+      #     portid: "1"
+      #     portstatus: "IDLE"
 
-      TEST081:
-        mode: ACTIVE
-        endpoint: C2
-        socket-type: LINE_LF
-        profile: scenario_fault_disconnect
-        vars:
-          lotid: "TESTLOT81"
-          stepid: "TESTSTEP81"
+      # TEST202:
+      #   mode: ACTIVE
+      #   endpoint: A2
+      #   socket-type: LINE_CR
+      #   profile: scenario_case1
+      #   vars:
+      #     lotid: "TESTLOT202"
+      #     carid: "TESTCAR202"
+      #     portid: "1"
+      #     portstatus: "IDLE"
+
+      # TEST203:
+      #   mode: ACTIVE
+      #   endpoint: A3
+      #   socket-type: LINE_CRLF
+      #   profile: scenario_fault_disconnect
+      #   vars:
+      #     lotid: "TESTLOT203"
+      #     carid: "TESTCAR203"
+      #     portid: "1"
+      #     portstatus: "IDLE"

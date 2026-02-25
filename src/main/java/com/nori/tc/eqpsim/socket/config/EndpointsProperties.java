@@ -6,63 +6,71 @@ import java.util.Map;
 /**
  * tc.eqpsim.endpoints.*
  *
- * - LISTEN: 시뮬레이터가 서버로 포트를 열고 TC가 접속
- * - CONNECT: 시뮬레이터가 클라이언트로 TC에 접속
+ * 용어 통일(사용자 요청):
+ * - PASSIVE: 시뮬레이터가 서버(bind/listen/accept)
+ * - ACTIVE : 시뮬레이터가 클라이언트(connect)
+ *
+ * 설정 키:
+ * - tc.eqpsim.endpoints.passive.<id>.bind
+ * - tc.eqpsim.endpoints.passive.<id>.max-conn
+ * - tc.eqpsim.endpoints.active.<id>.target
+ * - tc.eqpsim.endpoints.active.<id>.conn-count
+ * - tc.eqpsim.endpoints.active-backoff.*
  */
 public class EndpointsProperties {
 
     /**
-     * tc.eqpsim.endpoints.listen.<id>.*
+     * tc.eqpsim.endpoints.passive.<id>.*
      */
-    private Map<String, ListenEndpointProperties> listen = new LinkedHashMap<>();
+    private Map<String, PassiveEndpointProperties> passive = new LinkedHashMap<>();
 
     /**
-     * tc.eqpsim.endpoints.connect.<id>.*
+     * tc.eqpsim.endpoints.active.<id>.*
      */
-    private Map<String, ConnectEndpointProperties> connect = new LinkedHashMap<>();
+    private Map<String, ActiveEndpointProperties> active = new LinkedHashMap<>();
 
     /**
-     * CONNECT 재연결 정책(지수 백오프) - 사용자 결정(17-B)
+     * ACTIVE 재연결 백오프 설정
+     * - tc.eqpsim.endpoints.active-backoff.*
      */
-    private ConnectBackoffProperties connectBackoff = new ConnectBackoffProperties();
+    private ActiveBackoffProperties activeBackoff = new ActiveBackoffProperties();
 
-    public Map<String, ListenEndpointProperties> getListen() {
-        return listen;
+    public Map<String, PassiveEndpointProperties> getPassive() {
+        return passive;
     }
 
-    public void setListen(Map<String, ListenEndpointProperties> listen) {
-        this.listen = listen;
+    public void setPassive(Map<String, PassiveEndpointProperties> passive) {
+        this.passive = passive;
     }
 
-    public Map<String, ConnectEndpointProperties> getConnect() {
-        return connect;
+    public Map<String, ActiveEndpointProperties> getActive() {
+        return active;
     }
 
-    public void setConnect(Map<String, ConnectEndpointProperties> connect) {
-        this.connect = connect;
+    public void setActive(Map<String, ActiveEndpointProperties> active) {
+        this.active = active;
     }
 
-    public ConnectBackoffProperties getConnectBackoff() {
-        return connectBackoff;
+    public ActiveBackoffProperties getActiveBackoff() {
+        return activeBackoff;
     }
 
-    public void setConnectBackoff(ConnectBackoffProperties connectBackoff) {
-        this.connectBackoff = connectBackoff;
+    public void setActiveBackoff(ActiveBackoffProperties activeBackoff) {
+        this.activeBackoff = activeBackoff;
     }
 
     /**
-     * LISTEN endpoint 설정
+     * PASSIVE endpoint 설정(서버 bind)
      */
-    public static class ListenEndpointProperties {
+    public static class PassiveEndpointProperties {
 
         /**
-         * bind 주소: "0.0.0.0:31001" 형태
+         * bind 주소: "0.0.0.0:31001"
          */
         private String bind;
 
         /**
-         * 포트당 최대 연결 수
-         * - 사용자 결정(21-B): "초과 시 즉시 close" 방식으로 제한
+         * 포트당 최대 연결 수 (초과 시 accept 후 즉시 close)
          */
         private int maxConn = 20;
 
@@ -84,17 +92,19 @@ public class EndpointsProperties {
     }
 
     /**
-     * CONNECT endpoint 설정
+     * ACTIVE endpoint 설정(클라이언트 connect)
      */
-    public static class ConnectEndpointProperties {
+    public static class ActiveEndpointProperties {
 
         /**
-         * target 주소: "127.0.0.1:32001" 형태
+         * target 주소: "127.0.0.1:32001"
          */
         private String target;
 
         /**
          * 이 target으로 생성할 연결 수
+         * - 현재 구현에서는 "EQP 수만큼" 연결을 생성하며,
+         *   connCount는 진단/검증용으로만 경고를 낼 수 있다.
          */
         private int connCount = 20;
 
@@ -116,12 +126,9 @@ public class EndpointsProperties {
     }
 
     /**
-     * CONNECT 재연결 백오프 설정
-     * - initialSec: 최초 재시도 간격(초)
-     * - maxSec: 최대 간격(초)
-     * - multiplier: 증가 배수
+     * ACTIVE 재연결 백오프 설정
      */
-    public static class ConnectBackoffProperties {
+    public static class ActiveBackoffProperties {
 
         private long initialSec = 1;
         private long maxSec = 30;

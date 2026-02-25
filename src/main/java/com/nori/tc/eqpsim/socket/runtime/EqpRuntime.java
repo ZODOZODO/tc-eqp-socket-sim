@@ -12,33 +12,46 @@ import java.util.Objects;
 /**
  * EqpRuntime
  *
- * 목적:
- * - properties로부터 "검증/해석"된 EQP 런타임 정보를 담는다.
- * - Netty 연결 생성/파이프라인 구성(프레이머 설치) 단계에서 사용한다.
- *
- * 주의:
- * - 시나리오 로딩/실행은 이후 단계(6~)에서 처리한다.
+ * endpoint 의미:
+ * - mode=PASSIVE: endpointAddress = bind(host:port), passiveMaxConn 의미 있음
+ * - mode=ACTIVE : endpointAddress = target(host:port)
  */
 public final class EqpRuntime {
 
     private final String eqpId;
-    private final EqpProperties.Mode mode;          // PASSIVE / ACTIVE
-    private final String endpointId;                // L1, C1 ...
-    private final HostPort endpointAddress;          // bind or target
-    private final int listenMaxConn;                // PASSIVE + listen endpoint일 때만 의미
-    private final SocketTypeProperties socketType;   // 프레이밍 규칙
-    private final String profileId;                 // scenario_case1 ...
-    private final ProfileProperties profile;         // type/file 등
+    private final EqpProperties.Mode mode;
+
+    /**
+     * endpoints.passive / endpoints.active 의 id
+     */
+    private final String endpointId;
+
+    /**
+     * PASSIVE: bind, ACTIVE: target
+     */
+    private final HostPort endpointAddress;
+
+    /**
+     * PASSIVE에서만 의미 있음
+     */
+    private final int passiveMaxConn;
+
+    private final SocketTypeProperties socketType;
+
+    private final String profileId;
+    private final ProfileProperties profile;
+
     private final long waitTimeoutSec;
     private final long handshakeTimeoutSec;
-    private final Map<String, String> varsLowerKey;  // {var.xxx} 치환용(키 lower normalize)
+
+    private final Map<String, String> varsLowerKey;
 
     public EqpRuntime(
             String eqpId,
             EqpProperties.Mode mode,
             String endpointId,
             HostPort endpointAddress,
-            int listenMaxConn,
+            int passiveMaxConn,
             SocketTypeProperties socketType,
             String profileId,
             ProfileProperties profile,
@@ -50,7 +63,7 @@ public final class EqpRuntime {
         this.mode = Objects.requireNonNull(mode, "mode must not be null");
         this.endpointId = requireNotBlank(endpointId, "endpointId");
         this.endpointAddress = Objects.requireNonNull(endpointAddress, "endpointAddress must not be null");
-        this.listenMaxConn = listenMaxConn;
+        this.passiveMaxConn = passiveMaxConn;
         this.socketType = Objects.requireNonNull(socketType, "socketType must not be null");
         this.profileId = requireNotBlank(profileId, "profileId");
         this.profile = Objects.requireNonNull(profile, "profile must not be null");
@@ -83,8 +96,8 @@ public final class EqpRuntime {
         return endpointAddress;
     }
 
-    public int getListenMaxConn() {
-        return listenMaxConn;
+    public int getPassiveMaxConn() {
+        return passiveMaxConn;
     }
 
     public SocketTypeProperties getSocketType() {
