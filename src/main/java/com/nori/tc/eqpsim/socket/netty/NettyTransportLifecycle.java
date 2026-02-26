@@ -7,21 +7,36 @@ import com.nori.tc.eqpsim.socket.runtime.EqpRuntime;
 import com.nori.tc.eqpsim.socket.runtime.EqpRuntimeRegistry;
 import com.nori.tc.eqpsim.socket.runtime.HostPort;
 import com.nori.tc.eqpsim.socket.scenario.ScenarioRegistry;
-import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import io.netty.channel.socket.nio.NioSocketChannel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
 
-import java.util.*;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * NettyTransportLifecycle
+ *
+ * 역할:
+ * - Spring SmartLifecycle 구현체로, Spring 기동/종료 시 Netty 전송 계층을 관리합니다.
+ * - PASSIVE(서버 bind) 및 ACTIVE(클라이언트 connect)를 모두 처리합니다.
+ *
+ * 의존성:
+ * - EqpRuntimeRegistry: EQP 런타임 정보 및 PASSIVE pool 관리
+ * - ScenarioRegistry:   시나리오 plan 조회
+ * - ScenarioCompletionTracker: 완료/open-close 추적 → 프로세스 종료 판단
+ *
+ * 변경 이력:
+ * - ActiveClientConnector가 별도 파일로 분리되었습니다.
+ * - PassiveChildInitializer도 별도 내부 클래스에서 메서드로 단순화하였습니다.
+ */
 @SuppressWarnings("deprecation")
 public class NettyTransportLifecycle implements SmartLifecycle {
 
@@ -32,70 +47,162 @@ public class NettyTransportLifecycle implements SmartLifecycle {
     private final ScenarioRegistry scenarioRegistry;
     private final ScenarioCompletionTracker tracker;
 
-    private final Map<String, Channel> passiveServerChannels = new LinkedHashMap<>();
-    private final Map<String, AtomicInteger> passiveConnCounters = new ConcurrentHashMap<>();
-    private final Map<String, ActiveClientConnector> activeConnectors = new LinkedHashMap<>();
+    // ─── Netty 리소스 ────────────────────────────────────────────────
 
+    /** PASSIVE accept 전용 그룹 (보통 1 스레드) */
     private EventLoopGroup bossGroup;
+
+    /** PASSIVE child/ACTIVE I/O 처리 그룹 */
     private EventLoopGroup workerGroup;
+
+    // ─── 런타임 상태 ─────────────────────────────────────────────────
+
+    /** endpointId → PASSIVE 서버 채널 (bind된 ServerChannel) */
+    private final Map<String, Channel> passiveServerChannelById = new LinkedHashMap<>();
+
+    /** endpointId → PASSIVE 현재 연결 수 카운터 (ConnectionLimitHandler 공유) */
+    private final Map<String, AtomicInteger> passiveConnectionCounterById = new ConcurrentHashMap<>();
+
+    /** eqpId → ACTIVE 커넥터 */
+    private final Map<String, ActiveClientConnector> activeConnectorById = new LinkedHashMap<>();
 
     private volatile boolean running = false;
 
+    // ─── 생성자 ─────────────────────────────────────────────────────
+
     public NettyTransportLifecycle(EqpRuntimeRegistry registry,
-                                  EndpointsProperties.ActiveBackoffProperties activeBackoffProps,
-                                  ScenarioRegistry scenarioRegistry,
-                                  ScenarioCompletionTracker tracker) {
+                                   EndpointsProperties.ActiveBackoffProperties activeBackoffProps,
+                                   ScenarioRegistry scenarioRegistry,
+                                   ScenarioCompletionTracker tracker) {
         this.registry = registry;
         this.activeBackoffProps = activeBackoffProps;
         this.scenarioRegistry = scenarioRegistry;
         this.tracker = (tracker == null) ? ScenarioCompletionTracker.NOOP : tracker;
     }
 
+    // ─── SmartLifecycle ──────────────────────────────────────────────
+
     @Override
     public void start() {
         if (running) return;
 
-        this.bossGroup = new NioEventLoopGroup(1);
-        this.workerGroup = new NioEventLoopGroup();
+        bossGroup = new NioEventLoopGroup(1);
+        workerGroup = new NioEventLoopGroup();
 
         startPassiveServers();
         startActiveClients();
 
         running = true;
+
         log.info(StructuredLog.event("transport_started",
-                "passiveServerCount", passiveServerChannels.size(),
-                "activeClientCount", activeConnectors.size()));
+                "passiveServerCount", passiveServerChannelById.size(),
+                "activeClientCount", activeConnectorById.size()));
     }
 
+    @Override
+    public void stop() {
+        if (!running) return;
+
+        log.info(StructuredLog.event("transport_stopping"));
+
+        stopActiveClients();
+        stopPassiveServers();
+        shutdownEventLoopGroups();
+
+        running = false;
+
+        log.info(StructuredLog.event("transport_stopped"));
+    }
+
+    @Override
+    public void stop(Runnable callback) {
+        stop();
+        callback.run();
+    }
+
+    @Override
+    public boolean isRunning() {
+        return running;
+    }
+
+    @Override
+    public boolean isAutoStartup() {
+        return true;
+    }
+
+    @Override
+    public int getPhase() {
+        return 0;
+    }
+
+    // ─── PASSIVE 서버 시작/종료 ──────────────────────────────────────
+
+    /**
+     * 설정에 정의된 PASSIVE endpoint를 순서대로 bind합니다.
+     * bind 실패 시 예외를 throw하여 애플리케이션 기동을 중단합니다.
+     */
     private void startPassiveServers() {
-        for (Map.Entry<String, HostPort> e : registry.getPassiveBindById().entrySet()) {
-            String endpointId = e.getKey();
-            HostPort bind = e.getValue();
+        for (Map.Entry<String, HostPort> entry : registry.getPassiveBindById().entrySet()) {
+            String endpointId = entry.getKey();
+            HostPort bindAddress = entry.getValue();
             int maxConn = registry.getPassiveMaxConnById().getOrDefault(endpointId, 20);
 
-            AtomicInteger counter = new AtomicInteger(0);
-            passiveConnCounters.put(endpointId, counter);
+            AtomicInteger connectionCounter = new AtomicInteger(0);
+            passiveConnectionCounterById.put(endpointId, connectionCounter);
 
-            ServerBootstrap b = new ServerBootstrap();
-            b.group(bossGroup, workerGroup)
-                    .channel(NioServerSocketChannel.class)
-                    .childHandler(new PassiveChildInitializer(endpointId, maxConn, counter, registry, scenarioRegistry, tracker))
-                    .childOption(ChannelOption.TCP_NODELAY, true)
-                    .childOption(ChannelOption.SO_KEEPALIVE, true);
+            ServerBootstrap serverBootstrap = buildPassiveServerBootstrap(endpointId, maxConn, connectionCounter);
 
-            ChannelFuture f = b.bind(bind.host(), bind.port()).syncUninterruptibly();
-            if (!f.isSuccess()) {
-                throw new IllegalStateException("Failed to bind passive endpoint " + endpointId + " at " + bind, f.cause());
+            ChannelFuture bindFuture = serverBootstrap.bind(bindAddress.host(), bindAddress.port()).syncUninterruptibly();
+            if (!bindFuture.isSuccess()) {
+                throw new IllegalStateException(
+                        "PASSIVE endpoint bind 실패: endpointId=" + endpointId
+                        + " address=" + bindAddress.host() + ":" + bindAddress.port(),
+                        bindFuture.cause());
             }
-            passiveServerChannels.put(endpointId, f.channel());
+
+            passiveServerChannelById.put(endpointId, bindFuture.channel());
 
             log.info(StructuredLog.event("passive_bind_started",
                     "endpointId", endpointId,
-                    "bind", bind.host() + ":" + bind.port(),
+                    "bind", bindAddress.host() + ":" + bindAddress.port(),
                     "maxConn", maxConn));
         }
     }
 
+    /**
+     * PASSIVE 서버 Bootstrap을 구성합니다.
+     * child pipeline은 PassiveChildInitializer로 초기화됩니다.
+     */
+    private ServerBootstrap buildPassiveServerBootstrap(String endpointId,
+                                                        int maxConn,
+                                                        AtomicInteger connectionCounter) {
+        return new ServerBootstrap()
+                .group(bossGroup, workerGroup)
+                .channel(NioServerSocketChannel.class)
+                .childHandler(new PassiveChildInitializer(endpointId, maxConn, connectionCounter))
+                .childOption(ChannelOption.TCP_NODELAY, true)
+                .childOption(ChannelOption.SO_KEEPALIVE, true);
+    }
+
+    /** 모든 PASSIVE 서버 채널을 close합니다. */
+    private void stopPassiveServers() {
+        for (Map.Entry<String, Channel> entry : passiveServerChannelById.entrySet()) {
+            try {
+                entry.getValue().close().syncUninterruptibly();
+            } catch (Exception ex) {
+                log.warn(StructuredLog.event("passive_close_failed",
+                        "endpointId", entry.getKey()), ex);
+            }
+        }
+        passiveServerChannelById.clear();
+    }
+
+    // ─── ACTIVE 클라이언트 시작/종료 ─────────────────────────────────
+
+    /**
+     * 설정에 정의된 ACTIVE EQP를 순서대로 connect합니다.
+     * 각 EQP별로 ActiveClientConnector를 생성하고 즉시 connect를 시작합니다.
+     */
     private void startActiveClients() {
         for (EqpRuntime eqp : registry.getActiveEqps()) {
             ActiveClientConnector connector = new ActiveClientConnector(
@@ -105,184 +212,65 @@ public class NettyTransportLifecycle implements SmartLifecycle {
                     scenarioRegistry,
                     tracker
             );
-            activeConnectors.put(eqp.getEqpId(), connector);
+            activeConnectorById.put(eqp.getEqpId(), connector);
             connector.connectNow();
         }
     }
 
-    @Override
-    public void stop() {
-        if (!running) return;
-
-        log.info(StructuredLog.event("transport_stopping"));
-
-        for (ActiveClientConnector c : activeConnectors.values()) {
-            try { c.stop(); } catch (Exception ex) {
-                log.warn(StructuredLog.event("active_stop_failed", "eqpId", c.getEqpId()), ex);
+    /** 모든 ACTIVE 커넥터를 순서대로 stop합니다. */
+    private void stopActiveClients() {
+        for (ActiveClientConnector connector : activeConnectorById.values()) {
+            try {
+                connector.stop();
+            } catch (Exception ex) {
+                log.warn(StructuredLog.event("active_stop_failed",
+                        "eqpId", connector.getEqpId()), ex);
             }
         }
-        activeConnectors.clear();
+        activeConnectorById.clear();
+    }
 
-        for (Map.Entry<String, Channel> e : passiveServerChannels.entrySet()) {
-            try { e.getValue().close().syncUninterruptibly(); } catch (Exception ex) {
-                log.warn(StructuredLog.event("passive_close_failed", "endpointId", e.getKey()), ex);
-            }
+    /** Boss/Worker EventLoopGroup을 graceful shutdown합니다. */
+    private void shutdownEventLoopGroups() {
+        if (workerGroup != null) {
+            workerGroup.shutdownGracefully().syncUninterruptibly();
         }
-        passiveServerChannels.clear();
-
-        if (bossGroup != null) bossGroup.shutdownGracefully().syncUninterruptibly();
-        if (workerGroup != null) workerGroup.shutdownGracefully().syncUninterruptibly();
-
-        running = false;
-        log.info(StructuredLog.event("transport_stopped"));
+        if (bossGroup != null) {
+            bossGroup.shutdownGracefully().syncUninterruptibly();
+        }
     }
 
-    @Override public boolean isRunning() { return running; }
-    @Override public boolean isAutoStartup() { return true; }
-    @Override public int getPhase() { return 0; }
+    // ─── PASSIVE Child Pipeline 초기화 ───────────────────────────────
 
-    @Override
-    public void stop(Runnable callback) {
-        stop();
-        callback.run();
-    }
+    /**
+     * PassiveChildInitializer
+     *
+     * 역할:
+     * - TC가 accept될 때 child 채널의 pipeline을 구성합니다.
+     * - 구성 순서: ConnectionLimitHandler → PassiveBindAndFramerHandler
+     *   (PassiveBindAndFramerHandler 내부에서 framer/handshake/eqpLifecycle을 추가합니다)
+     */
+    private final class PassiveChildInitializer extends ChannelInitializer<SocketChannel> {
 
-    private static final class PassiveChildInitializer extends ChannelInitializer<SocketChannel> {
         private final String endpointId;
         private final int maxConn;
-        private final AtomicInteger counter;
-        private final EqpRuntimeRegistry registry;
-        private final ScenarioRegistry scenarioRegistry;
-        private final ScenarioCompletionTracker tracker;
+        private final AtomicInteger connectionCounter;
 
-        private PassiveChildInitializer(String endpointId, int maxConn, AtomicInteger counter,
-                                        EqpRuntimeRegistry registry,
-                                        ScenarioRegistry scenarioRegistry,
-                                        ScenarioCompletionTracker tracker) {
+        private PassiveChildInitializer(String endpointId, int maxConn, AtomicInteger connectionCounter) {
             this.endpointId = endpointId;
             this.maxConn = maxConn;
-            this.counter = counter;
-            this.registry = registry;
-            this.scenarioRegistry = scenarioRegistry;
-            this.tracker = tracker;
+            this.connectionCounter = connectionCounter;
         }
 
         @Override
         protected void initChannel(SocketChannel ch) {
-            ch.pipeline().addLast("connLimit", new ConnectionLimitHandler(maxConn, counter));
+            // 1) 최대 연결 수 제한: 초과 시 accept 후 즉시 close
+            ch.pipeline().addLast("connLimit",
+                    new ConnectionLimitHandler(maxConn, connectionCounter));
+
+            // 2) PASSIVE EQP 할당 + framer/handshake/eqpLifecycle 동적 추가
             ch.pipeline().addLast("passiveBind",
                     new PassiveBindAndFramerHandler(endpointId, registry, scenarioRegistry, tracker));
-        }
-    }
-
-    private static final class ActiveClientConnector {
-        private static final Logger log = LoggerFactory.getLogger(ActiveClientConnector.class);
-
-        private final EqpRuntime eqp;
-        private final EventLoopGroup group;
-        private final EndpointsProperties.ActiveBackoffProperties backoff;
-        private final Bootstrap bootstrap;
-
-        private volatile boolean stopped = false;
-        private volatile Channel channel;
-        private long attempt = 0;
-
-        private ActiveClientConnector(EqpRuntime eqp,
-                                      EventLoopGroup group,
-                                      EndpointsProperties.ActiveBackoffProperties backoff,
-                                      ScenarioRegistry scenarioRegistry,
-                                      ScenarioCompletionTracker tracker) {
-            this.eqp = eqp;
-            this.group = group;
-            this.backoff = backoff;
-
-            // ✅ scenarioRegistry/tracker는 필드로 들고 있지 않고 즉시 handler 생성에만 사용
-            this.bootstrap = new Bootstrap();
-            bootstrap.group(group)
-                    .channel(NioSocketChannel.class)
-                    .option(ChannelOption.TCP_NODELAY, true)
-                    .option(ChannelOption.SO_KEEPALIVE, true)
-                    .handler(new ActiveChannelInitializer(eqp, scenarioRegistry, tracker));
-        }
-
-        public String getEqpId() { return eqp.getEqpId(); }
-
-        public void connectNow() {
-            if (stopped) return;
-            HostPort target = eqp.getEndpointAddress();
-
-            log.info(StructuredLog.event("active_connecting",
-                    "eqpId", eqp.getEqpId(),
-                    "endpointId", eqp.getEndpointId(),
-                    "target", target.host() + ":" + target.port()));
-
-            ChannelFuture f = bootstrap.connect(target.host(), target.port());
-            f.addListener((ChannelFutureListener) future -> {
-                if (stopped) {
-                    if (future.channel() != null) future.channel().close();
-                    return;
-                }
-                if (!future.isSuccess()) {
-                    scheduleReconnect("connect_failed");
-                    return;
-                }
-
-                channel = future.channel();
-                attempt = 0;
-
-                log.info(StructuredLog.event("active_connected",
-                        "eqpId", eqp.getEqpId(),
-                        "connId", channel.id().asShortText(),
-                        "remote", String.valueOf(channel.remoteAddress()),
-                        "local", String.valueOf(channel.localAddress())));
-
-                channel.closeFuture().addListener((ChannelFutureListener) cf -> {
-                    if (stopped) return;
-
-                    String reason = channel.attr(ChannelAttributes.CLOSE_REASON).get();
-                    if (ChannelAttributes.CLOSE_REASON_SCENARIO_COMPLETED.equals(reason)) {
-                        log.info(StructuredLog.event("active_closed_no_reconnect",
-                                "eqpId", eqp.getEqpId(),
-                                "connId", channel.id().asShortText(),
-                                "closeReason", reason));
-                        stopped = true;
-                        return;
-                    }
-
-                    scheduleReconnect("channel_closed");
-                });
-            });
-        }
-
-        private void scheduleReconnect(String reason) {
-            attempt++;
-            long delaySec = computeDelaySec(attempt, backoff.getInitialSec(), backoff.getMaxSec(), backoff.getMultiplier());
-
-            log.warn(StructuredLog.event("active_reconnect_scheduled",
-                    "eqpId", eqp.getEqpId(),
-                    "reason", reason,
-                    "attempt", attempt,
-                    "delaySec", delaySec));
-
-            group.next().schedule(this::connectNow, delaySec, java.util.concurrent.TimeUnit.SECONDS);
-        }
-
-        private static long computeDelaySec(long attempt, long initialSec, long maxSec, double multiplier) {
-            double pow = Math.pow(multiplier, Math.max(0, attempt - 1));
-            long delay = (long) Math.ceil(initialSec * pow);
-            if (delay < 1) delay = 1;
-            return Math.min(delay, maxSec);
-        }
-
-        public void stop() {
-            stopped = true;
-            Channel ch = channel;
-            if (ch != null) {
-                log.info(StructuredLog.event("active_stopping",
-                        "eqpId", eqp.getEqpId(),
-                        "connId", ch.id().asShortText()));
-                ch.close().syncUninterruptibly();
-            }
         }
     }
 }
