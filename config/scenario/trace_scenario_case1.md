@@ -2,7 +2,7 @@
 [ Sim ] sleep=10s
 
 # interval emit 예시: 1초마다 1회
-[ EqpToTc ] every=1s count=100 CMD=TOOLEVENTS EQPID={eqpid} LOTID={var.lotid}
+[ EqpToTc ] every=1s count=10 CMD=TOOLEVENTS EQPID={eqpid} LOTID={var.lotid}
 
 # 무한으로 설정하고 싶을 경우 count=forever 로 설정
 # [ EqpToTc ] every=1s count=forever CMD=TOOLEVENTS EQPID={eqpid} LOTID={var.lotid}

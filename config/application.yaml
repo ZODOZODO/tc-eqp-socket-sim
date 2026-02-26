@@ -108,7 +108,7 @@ tc:
       #     portstatus: "IDLE"
 
       # ACTIVE (시뮬레이터가 TC로 접속)
-      SOCKET_P01:
+      DG_SOCKET_P01:
         mode: ACTIVE
         endpoint: A1
         socket-type: LINE_LF

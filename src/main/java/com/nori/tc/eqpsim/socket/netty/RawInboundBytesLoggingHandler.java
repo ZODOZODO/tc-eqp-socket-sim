@@ -15,20 +15,26 @@ import java.nio.charset.StandardCharsets;
  *
  * 목적:
  * - framer(디코더) 이전 단계에서 "실제 수신 바이트"를 확인한다.
+ * - 연결 초기 N번만 출력하여 로그 폭주를 방지한다.
  *
- * 정책:
- * - 로그 폭주 방지를 위해 연결당 처음 N번만 출력한다.
- * - payload는 UTF-8로 한번 보여주되, 깨질 수 있으니 hex도 같이 출력한다.
+ * ✅ [M5 수정] slice retain 누락
+ * - 기존: buf.slice() → 참조 카운트를 공유하므로,
+ *         하위 핸들러가 buf를 release하면 slice가 무효화될 위험이 있다.
+ * - 수정: buf.retainedSlice() → 독립적인 참조 카운트 획득,
+ *         로깅 후 slice.release()로 명시적 해제.
+ *
+ * 주의:
+ * - fireChannelRead(msg)는 finally 블록에서 수행하여 원본 buf가 항상 전달된다.
+ * - slice는 로깅에만 사용하고 즉시 release한다.
  */
 public class RawInboundBytesLoggingHandler extends ChannelInboundHandlerAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(RawInboundBytesLoggingHandler.class);
 
-    /**
-     * 연결당 로그 출력 횟수 제한(필요 시 조정)
-     */
+    /** 연결당 로그 출력 횟수 제한 */
     private final int maxLogsPerConn;
 
+    /** 현재 연결에서 출력한 로그 횟수 */
     private int logged = 0;
 
     public RawInboundBytesLoggingHandler() {
@@ -41,17 +47,18 @@ public class RawInboundBytesLoggingHandler extends ChannelInboundHandlerAdapter 
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
+        // 로깅 처리와 무관하게 원본 msg는 항상 다음 핸들러로 전달한다.
         try {
-            if (msg instanceof ByteBuf buf) {
-                if (logged < maxLogsPerConn) {
-                    logged++;
+            if (logged < maxLogsPerConn && msg instanceof ByteBuf buf) {
+                logged++;
 
-                    int len = buf.readableBytes();
-                    int previewLen = Math.min(len, 256);
+                int len = buf.readableBytes();
+                int previewLen = Math.min(len, 256);
 
-                    // readerIndex를 변경하지 않고 미리보기
-                    ByteBuf slice = buf.slice(buf.readerIndex(), previewLen);
-
+                // [M5 수정] retainedSlice() 사용: 독립적인 refcount 획득
+                // - 하위 핸들러의 release와 무관하게 안전하게 사용 가능
+                ByteBuf slice = buf.retainedSlice(buf.readerIndex(), previewLen);
+                try {
                     String text = slice.toString(StandardCharsets.UTF_8);
                     String hex = ByteBufUtil.hexDump(slice);
 
@@ -63,10 +70,13 @@ public class RawInboundBytesLoggingHandler extends ChannelInboundHandlerAdapter 
                             "previewBytes", previewLen,
                             "text", text,
                             "hex", hex));
+                } finally {
+                    // retainedSlice는 refcount가 독립적이므로 반드시 명시적으로 release한다.
+                    slice.release();
                 }
             }
         } finally {
-            // 반드시 다음 핸들러로 전달
+            // 원본 buf는 항상 다음 핸들러로 전달 (release 책임도 함께 위임)
             ctx.fireChannelRead(msg);
         }
     }
